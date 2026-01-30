@@ -10,7 +10,7 @@ import { RecentActivity } from './RecentActivity'
 import { NewSeriesModal } from './NewSeriesModal'
 import { toast } from 'sonner'
 import { useState, useEffect, useMemo, useDeferredValue } from 'react'
-import { getSeries, createSeries, updateSeries, deleteSeries, getDashboardStats, getRecentActivity } from '@/lib/api'
+import { getSeries, createSeries, updateSeries, deleteSeries, getDashboardStats, getRecentActivity, getEvents } from '@/lib/api'
 import type { Series, Event, DashboardStats, AuditLogItem } from '../types'
 
 const initialSeries: Series[] = [
@@ -266,11 +266,25 @@ export function Dashboard({ onNavigate }: DashboardProps = {}) {
   // Si hay serie y evento seleccionados, mostramos EventDetails.
   // Nota: EventCaptureView sólo se abre desde EventDetails cuando el usuario lo solicita.
   if (selectedEvent && selectedSeries) {
+    const handleEventUpdated = async () => {
+      // Refrescar el evento desde la API
+      try {
+        const events = await getEvents(selectedSeries.id)
+        const updatedEvent = events.find((e: any) => e.id === selectedEvent.id)
+        if (updatedEvent) {
+          setSelectedEvent(updatedEvent)
+        }
+      } catch (e) {
+        console.error('Error refreshing event:', e)
+      }
+    }
+
     return (
       <EventDetails
         event={selectedEvent}
         series={selectedSeries}
         onBack={handleBackToEvents}
+        onEventUpdated={handleEventUpdated}
       />
     )
   }

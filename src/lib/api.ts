@@ -191,6 +191,9 @@ export const updateRoper = (id: number, patch: Partial<{
 export const deleteRoper = (id: number) =>
   invoke<void>('delete_roper', { id });
 
+export const deleteAllRopers = () =>
+  invoke<number>('delete_all_ropers');
+
 // Payoffs
 export const listPayoffRules = (eventId?: number) =>
   invoke<any[]>('list_payoff_rules', { eventId });

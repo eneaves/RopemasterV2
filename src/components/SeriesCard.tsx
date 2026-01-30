@@ -78,7 +78,7 @@ export function SeriesCard({ series, onView, onEdit, onDuplicate, onDelete }: Pr
       <div className="mb-4">
         <div className="flex justify-between text-muted-foreground mb-2">
           <span>Progreso</span>
-          <span className="text-foreground">{Math.round(series.progress)}%</span>
+          <span className="text-foreground">{Math.round(series.progress ?? 0)}%</span>
         </div>
         <Progress value={series.progress} className="h-2 bg-[rgba(255,122,0,0.12)]" indicatorClassName="bg-[#FF7A00] rounded-full" />
       </div>

@@ -7,11 +7,6 @@ import {
   Lock,
   MoreVertical,
   Eye,
-  Shuffle,
-  Video,
-  BarChart3,
-  Download,
-  Copy,
   Trash2,
 } from 'lucide-react'
 import { Button } from './ui/button'
@@ -40,12 +35,6 @@ interface EventCardProps {
 export function EventCard({
   event,
   onViewTeams,
-  onGenerateDraw,
-  onRecordRuns,
-  onViewStandings,
-  onComputePayoffs,
-  onExport,
-  onDuplicate,
   onDelete,
   onEdit,
 }: EventCardProps) {

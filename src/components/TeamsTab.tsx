@@ -352,6 +352,11 @@ export function TeamsTab({ event, isLocked }: TeamsTabProps) {
         
         await refresh()
         
+        // Notificar al padre que se actualizaron los equipos
+        if (onTeamsUpdated) {
+          onTeamsUpdated()
+        }
+        
         if (created > 0) {
            toast.success(`⚡ ${created} equipos (Todos vs Todos) creados.`, {
              description: failed > 0 ? `${failed} fallidos.` : undefined,

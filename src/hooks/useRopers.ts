@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { listRopers, createRoper, updateRoper, deleteRoper } from '@/lib/api'
+import { listRopers, createRoper, updateRoper, deleteRoper, deleteAllRopers } from '@/lib/api'
 
 type Roper = {
   id: number
@@ -133,9 +133,27 @@ export function useRopers() {
     }
   }, [])
 
+  const removeAll = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const count = await deleteAllRopers()
+      toast.success(`Se eliminaron ${count} ropers`)
+      await refresh()
+      return count
+    } catch (e: any) {
+      const msg = String(e?.message ?? e)
+      setError(msg)
+      toast.error(msg)
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [refresh])
+
   useEffect(() => {
     refresh()
   }, [refresh])
 
-  return { ropers, loading, error, refresh, add, edit, remove } as const
+  return { ropers, loading, error, refresh, add, edit, remove, removeAll } as const
 }

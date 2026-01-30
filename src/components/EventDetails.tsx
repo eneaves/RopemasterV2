@@ -33,9 +33,11 @@ interface EventDetailsProps {
   onCreateEvent?: () => void
   // Permite controlar la pestaña inicial desde el llamador
   initialTab?: string
+  // Callback para notificar cuando el evento debe actualizarse
+  onEventUpdated?: () => void
 }
 
-export function EventDetails({ event, series, onBack, onCreateEvent, initialTab }: EventDetailsProps) {
+export function EventDetails({ event, series, onBack, onCreateEvent, initialTab, onEventUpdated }: EventDetailsProps) {
   const [activeTab, setActiveTab] = useState(initialTab ?? 'teams')
   const [isLocked, setIsLocked] = useState(event.status === 'locked')
   const [payoffsFinalized, setPayoffsFinalized] = useState(false)
@@ -143,10 +145,6 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab 
                 </Button>
               )}
 
-              <Button onClick={() => setShowCaptureView(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-sm h-11">
-                <Clock className="h-4 w-4 mr-2" /> Vista Captura
-              </Button>
-
               <Button onClick={handleEditEvent} variant="outline" className="border-border text-foreground hover:bg-background rounded-xl">
                 <Edit className="h-4 w-4 mr-2" /> Edit Event
               </Button>
@@ -185,7 +183,7 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab 
           <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden flex-1 min-h-[500px]">
             <div className="p-6 h-full">
               <TabsContent value="teams" className="mt-0 h-full">
-                <TeamsTab event={event} isLocked={isLocked} />
+                <TeamsTab event={event} isLocked={isLocked} onTeamsUpdated={onEventUpdated} />
               </TabsContent>
 
               <TabsContent value="draw" className="mt-0 h-full">

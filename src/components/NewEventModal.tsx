@@ -7,14 +7,6 @@ import { Switch } from './ui/switch'
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './ui/select'
 import type { Event as EventType } from '../types'
 
-const PAYOFF_PRESETS = [
-  { name: 'Personalizado', value: '' },
-  { name: 'Solo 1er Lugar (100%)', value: JSON.stringify({ "1": 100 }) },
-  { name: 'Top 2 (60/40)', value: JSON.stringify({ "1": 60, "2": 40 }) },
-  { name: 'Top 3 (50/30/20)', value: JSON.stringify({ "1": 50, "2": 30, "3": 20 }) },
-  { name: 'Top 4 (40/30/20/10)', value: JSON.stringify({ "1": 40, "2": 30, "3": 20, "4": 10 }) },
-]
-
 export function NewEventModal({
   isOpen,
   onClose,

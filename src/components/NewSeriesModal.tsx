@@ -96,7 +96,7 @@ export function NewSeriesModal({
       const seasonValue = deriveSeason(startDate || undefined, endDate || undefined)
 
       const newSeries: Series = {
-        id,
+        id: Number(id),
         name: name.trim(),
         season: seasonValue,
         status: status as Series['status'],

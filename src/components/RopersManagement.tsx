@@ -21,7 +21,7 @@ import { toast } from 'sonner'
 
 export function RopersManagement() {
   const [query, setQuery] = useState('')
-  const { ropers, add, edit, remove, refresh } = useRopers()
+  const { ropers, add, edit, remove, removeAll, refresh } = useRopers()
   const fileRef = useRef<HTMLInputElement | null>(null)
   const [importing, setImporting] = useState(false)
   const [categoryFilter, setCategoryFilter] = useState<'all'|'pro'|'amateur'|'principiante'>('all')
@@ -33,6 +33,7 @@ export function RopersManagement() {
       const [editing, setEditing] = useState<any | null>(null)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [deleteCandidate, setDeleteCandidate] = useState<any | null>(null)
+  const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false)
       const [firstName, setFirstName] = useState('')
       const [lastName, setLastName] = useState('')
       const [specialty, setSpecialty] = useState<'header'|'heeler'|'both'>('both')
@@ -212,6 +213,23 @@ export function RopersManagement() {
         setDeleteCandidate(null)
       }
 
+      const handleDeleteAllRequest = () => {
+        setIsDeleteAllModalOpen(true)
+      }
+
+      const handleConfirmDeleteAll = async () => {
+        try {
+          await removeAll()
+          setIsDeleteAllModalOpen(false)
+        } catch (e: any) {
+          // Error ya manejado por el hook con toast
+        }
+      }
+
+      const handleCancelDeleteAll = () => {
+        setIsDeleteAllModalOpen(false)
+      }
+
       const q = query.trim().toLowerCase()
       const filtered = ropers
         .filter((r) => {
@@ -252,6 +270,7 @@ export function RopersManagement() {
             <div className="flex items-center gap-3">
                 <Button variant="outline" className="rounded-md" onClick={() => fileRef.current?.click()} disabled={importing}>Importar Excel</Button>
                 <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={handleFile} />
+              <Button variant="destructive" className="rounded-md" onClick={handleDeleteAllRequest}>Borrar Todos</Button>
               <Button onClick={openCreate} className="bg-primary text-primary-foreground rounded-md">+ Agregar Nuevo Roper</Button>
             </div>
           </div>
@@ -390,6 +409,30 @@ export function RopersManagement() {
               <DialogFooter>
                 <Button variant="outline" onClick={handleCancelDelete} className="border-border">Cancelar</Button>
                 <Button onClick={handleConfirmDelete} className="bg-destructive text-primary-foreground">Eliminar</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Confirmación de borrado de todos los ropers */}
+          <Dialog open={isDeleteAllModalOpen} onOpenChange={setIsDeleteAllModalOpen}>
+            <DialogContent className="sm:max-w-[500px]">
+              <DialogHeader>
+                <DialogTitle>Confirmar eliminación masiva</DialogTitle>
+                <DialogDescription>
+                  ¿Estás seguro de que quieres eliminar TODOS los ropers ({ropers.length} en total)? Esta acción no se puede deshacer.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 my-4">
+                <p className="text-sm font-medium text-destructive">⚠️ Advertencia</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Esta acción eliminará permanentemente todos los ropers del sistema. Asegúrate de tener un respaldo antes de continuar.
+                </p>
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={handleCancelDeleteAll} className="border-border">Cancelar</Button>
+                <Button onClick={handleConfirmDeleteAll} className="bg-destructive text-primary-foreground">Sí, eliminar todos</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>

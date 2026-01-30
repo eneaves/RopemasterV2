@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react'
-import { Trophy, Medal, Award, Search, Download, RefreshCw } from 'lucide-react'
+import { Search, Download, RefreshCw } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'

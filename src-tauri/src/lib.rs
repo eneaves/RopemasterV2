@@ -271,7 +271,13 @@ async fn list_events(db: State<'_, Db>, series_id: Option<i64>) -> Result<Vec<Ev
              (SELECT COUNT(*) FROM team t WHERE t.event_id = e.id AND t.status = 'active') as teams_count,
              (
                 COALESCE(e.prize_pool, 0.0) + 
-                (COALESCE(e.entry_fee, 0.0) * (SELECT COUNT(*) FROM team t WHERE t.event_id = e.id AND t.status = 'active'))
+                (COALESCE(e.entry_fee, 0.0) * (
+                    SELECT COUNT(DISTINCT roper_id) FROM (
+                        SELECT header_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                        UNION
+                        SELECT heeler_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                    )
+                ))
              ) as pot
             FROM event e
             WHERE e.is_deleted = 0 AND e.series_id = ?1
@@ -292,7 +298,13 @@ async fn list_events(db: State<'_, Db>, series_id: Option<i64>) -> Result<Vec<Ev
              (SELECT COUNT(*) FROM team t WHERE t.event_id = e.id AND t.status = 'active') as teams_count,
              (
                 COALESCE(e.prize_pool, 0.0) + 
-                (COALESCE(e.entry_fee, 0.0) * (SELECT COUNT(*) FROM team t WHERE t.event_id = e.id AND t.status = 'active'))
+                (COALESCE(e.entry_fee, 0.0) * (
+                    SELECT COUNT(DISTINCT roper_id) FROM (
+                        SELECT header_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                        UNION
+                        SELECT heeler_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                    )
+                ))
              ) as pot
             FROM event e
             WHERE e.is_deleted = 0
@@ -719,18 +731,25 @@ async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<Payout
     .await
     .map_err(|e| e.to_string())?;
 
-    // 2. Count Active Teams
-    let team_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM team WHERE event_id = ?1 AND status = 'active'")
-            .bind(event_id)
-            .fetch_one(&db.0)
-            .await
-            .map_err(|e| e.to_string())?;
+    // 2. Count unique ropers in the event (each roper pays once, regardless of how many teams they're in)
+    let unique_ropers: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT roper_id) FROM (
+            SELECT header_id AS roper_id FROM team WHERE event_id = ?1 AND status = 'active'
+            UNION
+            SELECT heeler_id AS roper_id FROM team WHERE event_id = ?1 AND status = 'active'
+        )
+        "#
+    )
+    .bind(event_id)
+    .fetch_one(&db.0)
+    .await
+    .map_err(|e| e.to_string())?;
 
-    // 3. Calculate Pot
+    // 3. Calculate Pot (per unique roper)
     let entry_fee = event.entry_fee.unwrap_or(0.0);
     let prize_pool = event.prize_pool.unwrap_or(0.0);
-    let total_pot = (team_count as f64 * entry_fee) + prize_pool;
+    let total_pot = (unique_ropers as f64 * entry_fee) + prize_pool;
 
     // Deductions (Placeholder: 0% for now, or make it configurable later)
     let deduction_pct = 0.0;
@@ -1234,6 +1253,28 @@ async fn delete_roper(db: State<'_, Db>, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
+    // Hard-delete: primero elimina todos los equipos, luego elimina todos los ropers
+    
+    // Paso 1: Eliminar todos los equipos
+    sqlx::query("DELETE FROM team")
+        .execute(&db.0)
+        .await
+        .map_err(|e| format!("Error eliminando equipos: {}", e.to_string()))?;
+    
+    // Paso 2: Eliminar todos los ropers
+    let res = sqlx::query("DELETE FROM roper")
+        .execute(&db.0)
+        .await
+        .map_err(|e| format!("Error eliminando ropers: {}", e.to_string()))?;
+
+    let count = res.rows_affected() as i64;
+    
+    log_audit(&db.0, "delete_all_ropers", "roper", None, Some(format!("Deleted {} ropers and all teams", count))).await?;
+    Ok(count)
+}
+
 #[derive(serde::Deserialize)]
 struct UpdateTeam {
     id: i64,
@@ -1643,7 +1684,7 @@ async fn generate_draw_batch(
             // 1. Random shuffle first
             teams.shuffle(&mut thread_rng());
 
-            // 2. Smart sort to avoid consecutive ropers
+            // 2. Smart sort to avoid consecutive ropers with improved spacing
             let mut ordered: Vec<(i64, i64, i64)> = Vec::with_capacity(teams.len());
             let mut pool = teams.clone();
             
@@ -1651,33 +1692,31 @@ async fn generate_draw_batch(
                 let mut best_idx = 0;
                 let mut best_score = -1;
                 
-                // Scan candidates
+                // Scan all candidates in pool
                 for (i, candidate) in pool.iter().enumerate() {
-                    let mut spacing = 0;
-                    let mut conflicts = false;
+                    let mut min_distance = 999; // Large number
                     
-                    // Check backwards in 'ordered' to find distance to last conflict
-                    // We check only last 5 for performance/relevance
-                    for prev in ordered.iter().rev().take(10) {
-                         spacing += 1;
+                    // Check backwards in 'ordered' to find minimum distance to any conflict
+                    // We now check ALL previous entries, not just last 10
+                    for (distance, prev) in ordered.iter().rev().enumerate() {
+                         let dist = distance + 1;
                          // Check if any roper matches
                          if prev.1 == candidate.1 || prev.1 == candidate.2 || 
                             prev.2 == candidate.1 || prev.2 == candidate.2 {
-                             conflicts = true;
-                             break;
+                             min_distance = dist;
+                             break; // Found closest conflict
                          }
                     }
                     
-                    // Score: if no conflict in last 10, score is 100 max used.
-                    // If conflict at distance 'spacing', score is 'spacing'.
-                    // We want to maximize spacing.
-                    let score = if conflicts { spacing } else { 100 };
+                    // Score is the minimum distance to any conflict
+                    // Higher is better. If no conflict found, min_distance stays at 999
+                    let score = min_distance as i64;
                     
                     if score > best_score {
                         best_score = score;
                         best_idx = i;
-                        // Optimization: if we found a candidate with no recent conflict, pick it immediately
-                        if score >= 10 { break; } 
+                        // If we found a candidate with no conflict in recent history (>20 positions), take it
+                        if score > 20 { break; } 
                     }
                 }
                 
@@ -1966,12 +2005,18 @@ async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String
     let total_teams: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM team WHERE status = 'active'")
         .fetch_one(pool).await.map_err(|e| e.to_string())?;
 
-    // Calculate Total Pot: Sum of (entry_fee * team_count) + prize_pool for all active/completed events
+    // Calculate Total Pot: Sum of (entry_fee * unique_ropers) + prize_pool for all active/completed events
     let pot_opt: Option<f64> = sqlx::query_scalar(
         r#"
         SELECT SUM(
             COALESCE(e.prize_pool, 0) + 
-            (COALESCE(e.entry_fee, 0) * (SELECT COUNT(*) FROM team t WHERE t.event_id = e.id AND t.status = 'active'))
+            (COALESCE(e.entry_fee, 0) * (
+                SELECT COUNT(DISTINCT roper_id) FROM (
+                    SELECT header_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                    UNION
+                    SELECT heeler_id AS roper_id FROM team WHERE event_id = e.id AND status = 'active'
+                )
+            ))
         )
         FROM event e
         WHERE e.is_deleted = 0 AND e.status IN ('active', 'completed', 'locked')
@@ -2302,6 +2347,7 @@ pub fn run() {
             create_roper,
             update_roper,
             delete_roper,
+            delete_all_ropers,
             // payoff rules
             list_payoff_rules,
             delete_payoff_rule,

@@ -8,6 +8,7 @@ import { Input } from './ui/input'
 import { Label } from './ui/label'
 import { Checkbox } from './ui/checkbox'
 import { Badge } from './ui/badge'
+import { Switch } from './ui/switch'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from './ui/select'
@@ -64,6 +65,8 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const [penalty, setPenalty] = useState('0')
   const [noTime, setNoTime] = useState(false)
   const [dq, setDq] = useState(false)
+  const [isManualMode, setIsManualMode] = useState(false)
+  const [manualTimeInput, setManualTimeInput] = useState('')
   const [globalStandings, setGlobalStandings] = useState<GlobalStanding[]>([])
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
   const [inputPin, setInputPin] = useState('')
@@ -178,10 +181,19 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
         case 'n':
         case 'N':
           e.preventDefault()
+          setNoTime(prev => {
+            const newValue = !prev
+            if (newValue) setDq(false)
+            return newValue
+          })
+          break
+        case 'ArrowRight':
+          e.preventDefault()
           handleNext()
           break
         case 'p':
         case 'P':
+        case 'ArrowLeft':
           e.preventDefault()
           handlePrevious()
           break
@@ -241,7 +253,10 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     handleReset()
     if (run.status === 'completed') {
         // Optional: Load existing data to edit
-        if (run.time !== null) setTimerValue(run.time * 1000)
+        if (run.time !== null) {
+          setTimerValue(run.time * 1000)
+          setManualTimeInput(run.time.toFixed(3))
+        }
         setPenalty(String(run.penalty))
         setNoTime(run.noTime)
         setDq(run.dq)
@@ -256,6 +271,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     setPenalty('0')
     setNoTime(false)
     setDq(false)
+    setManualTimeInput('')
   }
 
   const handleCloseCapture = () => {
@@ -278,7 +294,24 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
 
   const performSave = async () => {
     if (!currentRun || !event?.id) return
-    const timeInSeconds = timerValue / 1000
+    
+    // Calcular tiempo según el modo
+    let timeInSeconds: number
+    if (isManualMode) {
+      const manualTime = parseFloat(manualTimeInput.trim())
+      console.log('Manual time input:', manualTimeInput, 'Parsed:', manualTime, 'isNaN:', isNaN(manualTime))
+      
+      if (!noTime && !dq) {
+        if (isNaN(manualTime) || manualTime <= 0) {
+          toast.error('Ingresa un tiempo válido mayor a 0')
+          return
+        }
+      }
+      timeInSeconds = isNaN(manualTime) ? 0 : manualTime
+    } else {
+      timeInSeconds = timerValue / 1000
+    }
+    
     const penaltyValue = parseFloat(penalty) || 0
 
     try {
@@ -294,26 +327,24 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
             captured_by: null // TODO: Add user ID if auth exists
         })
 
-        toast.success('Run guardado', { description: (noTime || dq) ? 'Equipo eliminado de rondas siguientes.' : undefined })
-
-        // Re-fetch to apply "skipped" filtering if applicable
-        await fetchRuns()
-        
-        // Move to next if exists
-        handleNext()
-         
+        // Lock event if not locked yet
         if (!isLocked) {
             await updateEventStatus(Number(event.id), 'locked')
             onLock()
             toast.success('Run guardado', { description: 'Evento bloqueado: no se puede regenerar draw.' })
         } else {
-            toast.success('Run guardado')
+            toast.success('Run guardado', { description: (noTime || dq) ? 'Equipo eliminado de rondas siguientes.' : undefined })
         }
+
+        // Re-fetch to apply "skipped" filtering if applicable
+        await fetchRuns()
         
         // Refresh standings
         fetchStandingsData()
         
+        // Move to next if exists
         handleNext()
+        
         setIsConfirmOpen(false)
     } catch (error) {
         console.error('Error saving run:', error)
@@ -524,46 +555,109 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                 </Button>
               </div>
 
+              {/* Mode Toggle */}
+              <div className="flex items-center justify-center gap-3 mb-6 p-4 bg-muted/30 rounded-xl border border-border/50">
+                <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
+                  !isManualMode ? 'text-foreground' : 'text-muted-foreground'
+                }`}>
+                  Cronómetro
+                </Label>
+                <Switch
+                  id="mode-switch"
+                  checked={isManualMode}
+                  onCheckedChange={(checked) => {
+                    setIsManualMode(checked)
+                    handleReset()
+                  }}
+                />
+                <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
+                  isManualMode ? 'text-foreground' : 'text-muted-foreground'
+                }`}>
+                  Entrada Manual
+                </Label>
+              </div>
+
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                  {/* Timer Display */}
-                  <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden group">
-                      <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
-                        <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
-                            <Clock className="w-3 h-3" /> Cronómetro
+                  {/* Timer Display or Manual Input */}
+                  {!isManualMode ? (
+                    <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden group">
+                        <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
+                          <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
+                              <Clock className="w-3 h-3" /> Cronómetro
+                          </div>
                         </div>
-                      </div>
-                      
-                      <div className="text-5xl lg:text-7xl font-mono font-bold text-primary tracking-tighter tabular-nums z-10 selection:bg-primary selection:text-primary-foreground">
-                        {formatTime(timerValue)}
-                      </div>
-                  </div>
+                        
+                        <div className="text-5xl lg:text-7xl font-mono font-bold text-primary tracking-tighter tabular-nums z-10 selection:bg-primary selection:text-primary-foreground">
+                          {formatTime(timerValue)}
+                        </div>
+                    </div>
+                  ) : (
+                    <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden min-h-[200px]">
+                        <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
+                          <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
+                              <Clock className="w-3 h-3" /> Entrada Manual
+                          </div>
+                        </div>
+                        
+                        <div className="w-full flex flex-col items-center justify-center z-10 px-4">
+                          <input
+                            type="number"
+                            step="0.001"
+                            value={manualTimeInput}
+                            onChange={(e) => setManualTimeInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                handleSaveRun()
+                              }
+                            }}
+                            placeholder="0.000"
+                            className="text-5xl lg:text-6xl font-mono font-bold text-center border-none bg-transparent text-primary tracking-tighter tabular-nums outline-none w-full [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                          />
+                          <p className="text-center text-background/60 text-xs font-mono mt-3 uppercase tracking-widest">segundos</p>
+                        </div>
+                    </div>
+                  )}
 
                    {/* Controls */}
-                   <div className="flex flex-col justify-center gap-4">
-                        <Button
-                            onClick={handleStartStop}
-                            className={`h-20 text-xl font-medium rounded-2xl shadow-sm transition-all duration-200 transform active:scale-[0.98] ${
-                            timerRunning 
-                                ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground ring-4 ring-destructive/10' 
-                                : 'bg-emerald-600 hover:bg-emerald-700 text-white ring-4 ring-emerald-600/10'
-                            }`}
-                        >
-                            {timerRunning ? (
-                            <span className="flex items-center gap-3">
-                                <Pause className="w-8 h-8 fill-current" /> Pausar
-                            </span>
-                            ) : (
-                            <span className="flex items-center gap-3">
-                                <Play className="w-8 h-8 fill-current" /> Iniciar
-                            </span>
-                            )}
-                        </Button>
-                        
-                        <Button onClick={handleReset} variant="outline" className="h-14 text-base border-border hover:bg-accent hover:text-accent-foreground rounded-xl">
-                            <RotateCcw className="w-5 h-5 mr-2 group-hover:rotate-180 transition-transform duration-500" />
-                            Reiniciar (Reset)
-                        </Button>
-                   </div>
+                   {!isManualMode ? (
+                     <div className="flex flex-col justify-center gap-4">
+                          <Button
+                              onClick={handleStartStop}
+                              className={`h-20 text-xl font-medium rounded-2xl shadow-sm transition-all duration-200 transform active:scale-[0.98] ${
+                              timerRunning 
+                                  ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground ring-4 ring-destructive/10' 
+                                  : 'bg-emerald-600 hover:bg-emerald-700 text-white ring-4 ring-emerald-600/10'
+                              }`}
+                          >
+                              {timerRunning ? (
+                              <span className="flex items-center gap-3">
+                                  <Pause className="w-8 h-8 fill-current" /> Pausar
+                              </span>
+                              ) : (
+                              <span className="flex items-center gap-3">
+                                  <Play className="w-8 h-8 fill-current" /> Iniciar
+                              </span>
+                              )}
+                          </Button>
+                          
+                          <Button onClick={handleReset} variant="outline" className="h-14 text-base border-border hover:bg-accent hover:text-accent-foreground rounded-xl">
+                              <RotateCcw className="w-5 h-5 mr-2 group-hover:rotate-180 transition-transform duration-500" />
+                              Reiniciar (Reset)
+                          </Button>
+                     </div>
+                   ) : (
+                     <div className="flex flex-col justify-center gap-4">
+                          <Button onClick={handleReset} variant="outline" className="h-14 text-base border-border hover:bg-accent hover:text-accent-foreground rounded-xl">
+                              <RotateCcw className="w-5 h-5 mr-2" />
+                              Limpiar
+                          </Button>
+                          <div className="p-4 bg-muted/50 rounded-xl border border-border/50 text-sm text-muted-foreground">
+                            <p className="font-medium mb-1">Ingresa el tiempo manualmente</p>
+                            <p className="text-xs">Formato: segundos con hasta 3 decimales (ej: 8.456)</p>
+                          </div>
+                     </div>
+                   )}
               </div>
 
               {/* Validation Inputs */}

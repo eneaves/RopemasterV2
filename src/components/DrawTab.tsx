@@ -31,7 +31,6 @@ interface DrawEntry {
 export function DrawTab({ event, isLocked }: DrawTabProps) {
   const [rounds, setRounds] = useState<string>(String(event?.rounds ?? 3))
   const [autoBalance, setAutoBalance] = useState(true)
-  const [rearrangeIfExists, setRearrangeIfExists] = useState(false)
   const [drawGenerated, setDrawGenerated] = useState(false)
   const [drawEntries, setDrawEntries] = useState<DrawEntry[]>([])
   const [showExclusionsModal, setShowExclusionsModal] = useState(false)
