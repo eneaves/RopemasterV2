@@ -77,7 +77,11 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
         rounds: numRounds,
         shuffle: autoBalance
       })
-      toast.success('¡Draw completo generado exitosamente!')
+      if (numRounds > 1) {
+        toast.success(`¡Rondas 1 a ${numRounds - 1} generadas! La ronda ${numRounds} (final) debe generarse después de completar las rondas anteriores.`)
+      } else {
+        toast.success('¡Draw generado exitosamente!')
+      }
       await fetchDraw()
     } catch (error) {
       console.error('Error generating batch draw:', error)
@@ -91,6 +95,9 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
     if (!event?.id) return
     setLoading(true)
     try {
+      const numRounds = parseInt(rounds) || 3
+      const isFinalRound = roundNumber === numRounds
+      
       // Si es una ronda > 1, es crítico que la anterior esté "completa" en teoría, 
       // pero el usuario sabe lo que hace. El backend filtrará los eliminados.
       await generateDraw({
@@ -99,7 +106,12 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
         reseed: autoBalance,
         seed_runs: true
       })
-      toast.success(`¡Ronda ${roundNumber} generada! Se han excluido equipos eliminados.`)
+      
+      if (isFinalRound) {
+        toast.success(`¡Ronda final ${roundNumber} generada! Los ropers se ordenaron de mayor a menor tiempo acumulado.`)
+      } else {
+        toast.success(`¡Ronda ${roundNumber} generada! Se han excluido equipos eliminados.`)
+      }
       await fetchDraw()
     } catch (error) {
       console.error(`Error generating round ${roundNumber}:`, error)
@@ -168,9 +180,10 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                    onClick={handleGenerateBatch}
                    disabled={loading}
                    className="border-primary text-primary hover:bg-primary/10"
+                   title="Genera todas las rondas excepto la última. La última ronda debe generarse después para ordenar por tiempos acumulados."
                 >
                    <Shuffle className="w-4 h-4 mr-2" />
-                   Generar Todas las Rondas (Batch)
+                   Generar Rondas Iniciales (N-1)
                 </Button>
               )}
          </div>
@@ -182,6 +195,7 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
              const exists = entriesByRound[r] && entriesByRound[r].length > 0
              const prevRoundExists = r === 1 ? true : (entriesByRound[r-1] && entriesByRound[r-1].length > 0)
              const count = exists ? entriesByRound[r].length : 0
+             const isFinalRound = r === numRoundsConfig
              
              // Check if THIS specific round has any run captured/completed
              // Ignoramos 'skipped' para que no bloquee la regeneración (ya que son eliminados automáticos)
@@ -195,7 +209,9 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                <div key={r} className={`rounded-xl border p-4 ${exists ? 'bg-card border-border' : 'bg-muted/30 border-dashed border-border'}`}>
                   <div className="flex justify-between items-start mb-3">
                      <div>
-                        <h4 className="font-semibold text-foreground">Ronda {r}</h4>
+                        <h4 className="font-semibold text-foreground">
+                           Ronda {r} {isFinalRound && <Badge variant="secondary" className="ml-2 text-xs">Final</Badge>}
+                        </h4>
                         <p className="text-sm text-muted-foreground">
                            {exists ? `${count} equipos` : 'No generada'} 
                         </p>
@@ -215,7 +231,10 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                               className="w-full text-xs border-dashed border-red-200 text-red-700 hover:bg-red-50 hover:border-red-300"
                               disabled={loading}
                               onClick={() => {
-                                  if(window.confirm(`¿Regenerar Ronda ${r}? Esto borrará los tiempos actuales de esta ronda y excluirá equipos eliminados en rondas previas.`)) {
+                                  const msg = isFinalRound 
+                                     ? `¿Regenerar Ronda Final ${r}? Los ropers se ordenarán de mayor a menor tiempo acumulado.`
+                                     : `¿Regenerar Ronda ${r}? Esto borrará los tiempos actuales de esta ronda y excluirá equipos eliminados en rondas previas.`
+                                  if(window.confirm(msg)) {
                                       handleGenerateRound(r)
                                   }
                               }}
@@ -238,6 +257,7 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                         className="w-full mt-2"
                         disabled={!canGenerate || loading}
                         onClick={() => handleGenerateRound(r)}
+                        title={isFinalRound ? "Se ordenará de mayor a menor tiempo acumulado" : ""}
                      >
                         {loading ? 'Generando...' : `Generar Draw Ronda ${r}`}
                      </Button>
@@ -245,7 +265,7 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                   
                   {!exists && !prevRoundExists && r > 1 && (
                      <p className="text-xs text-orange-500 mt-2">
-                        Completa la ronda anterior primero.
+                        {isFinalRound ? 'Completa las rondas anteriores y la ronda final se ordenará por tiempos acumulados.' : 'Completa la ronda anterior primero.'}
                      </p>
                   )}
                   

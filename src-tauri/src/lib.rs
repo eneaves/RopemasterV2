@@ -1552,6 +1552,15 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
         return Err(format!("La ronda {} ya ha comenzado (tiene tiempos capturados). No se puede regenerar.", opts.round));
     }
 
+    // Get the total number of rounds for this event to check if this is the final round
+    let total_rounds: i64 = sqlx::query_scalar("SELECT rounds FROM event WHERE id = ?1")
+        .bind(opts.event_id)
+        .fetch_one(&db.0)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let is_final_round = opts.round == total_rounds;
+
     // 2) obtener teams activos del evento que NO estén eliminados (NT o DQ previos)
     let mut teams: Vec<i64> = sqlx::query_scalar(
         r#"
@@ -1573,11 +1582,67 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
         return Err("No hay equipos activos para generar el draw.".into());
     }
 
-    // 3) si reseed o no hay draw previo, barajar
-    let reseed = opts.reseed.unwrap_or(true);
-    if reseed {
-        teams.shuffle(&mut thread_rng());
+    // 3) Special handling for final round: sort by accumulated time (highest to lowest)
+    if is_final_round {
+        // Get accumulated times for all qualifying teams (before the final round)
+        // We need to sort by total accumulated time in descending order (highest time goes first)
+        let team_times: Vec<(i64, Option<f64>)> = {
+            let mut result = Vec::new();
+            for &team_id in teams.iter() {
+                let total: Option<f64> = sqlx::query_scalar(
+                    r#"
+                    SELECT SUM(total_sec)
+                    FROM run
+                    WHERE event_id = ?1 
+                      AND team_id = ?2
+                      AND round < ?3
+                      AND status = 'completed'
+                      AND no_time = 0
+                      AND dq = 0
+                    "#
+                )
+                .bind(opts.event_id)
+                .bind(team_id)
+                .bind(opts.round)
+                .fetch_one(&db.0)
+                .await
+                .map_err(|e| e.to_string())?;
+                
+                result.push((team_id, total));
+            }
+            result
+        };
+
+        // Sort by accumulated time: highest first (DESC), teams without times go last
+        teams = {
+            let mut teams_with_times: Vec<_> = team_times.iter()
+                .filter(|(_, time)| time.is_some())
+                .map(|(id, time)| (*id, time.unwrap()))
+                .collect();
+            
+            // Sort by time descending (highest first)
+            teams_with_times.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            
+            let mut result: Vec<i64> = teams_with_times.iter().map(|(id, _)| *id).collect();
+            
+            // Add teams without times at the end
+            let teams_without_times: Vec<i64> = team_times.iter()
+                .filter(|(_, time)| time.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            
+            result.extend(teams_without_times);
+            result
+        };
+    } else {
+        // 3) Normal rounds: reseed or keep order
+        let reseed = opts.reseed.unwrap_or(true);
+        if reseed {
+            teams.shuffle(&mut thread_rng());
+        }
     }
+
+
 
     let seed_runs = opts.seed_runs.unwrap_or(true);
 
@@ -1677,8 +1742,12 @@ async fn generate_draw_batch(
 
     let mut tx: Transaction<'_, Sqlite> = db.0.begin().await.map_err(|e| e.to_string())?;
 
-    // For each round
-    for r in 1..=opts.rounds {
+    // For each round EXCEPT THE LAST ONE
+    // The last round should be generated separately after all intermediate rounds are completed
+    // so that ropers can be sorted by accumulated time (highest to lowest)
+    let rounds_to_generate = if opts.rounds > 1 { opts.rounds - 1 } else { opts.rounds };
+    
+    for r in 1..=rounds_to_generate {
         // Shuffle if requested (with smart spacing logic)
         if opts.shuffle {
             // 1. Random shuffle first
@@ -1768,8 +1837,8 @@ async fn generate_draw_batch(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    log_audit(&db.0, "generate_draw_batch", "draw", None, Some(format!("Event {} Rounds {}", opts.event_id, opts.rounds))).await?;
-    Ok(teams.len() as i64 * opts.rounds)
+    log_audit(&db.0, "generate_draw_batch", "draw", None, Some(format!("Event {} Rounds 1-{} (Final round {} to be generated separately)", opts.event_id, rounds_to_generate, opts.rounds))).await?;
+    Ok(teams.len() as i64 * rounds_to_generate)
 }
 
 /* ------------------- STANDINGS (LITE) ------------------- */

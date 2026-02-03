@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Edit, Clock, Lock, Plus, MapPin, Calendar, Layers, Trophy } from 'lucide-react'
+import { Edit, Lock, Plus, MapPin, Calendar, Layers, Trophy } from 'lucide-react'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'

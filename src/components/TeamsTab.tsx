@@ -26,6 +26,7 @@ import { useRopers } from '@/hooks/useRopers'
 interface TeamsTabProps {
   event: any
   isLocked?: boolean
+  onTeamsUpdated?: () => void
 }
 
 interface Team {
@@ -50,7 +51,7 @@ interface Exclusion {
 
 // ropers will be loaded from DB via hook
 
-export function TeamsTab({ event, isLocked }: TeamsTabProps) {
+export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   const eventIdStr: string = String(event?.id ?? '')
   const eventIdNum: number = Number(event?.id ?? 0)
   const { teams, add, edit, remove, refresh } = useTeams(eventIdNum, !!isLocked)

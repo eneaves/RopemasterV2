@@ -228,13 +228,18 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
           // If it fails (round started), we just catch the error and load what exists.
           // Note: We only want to do this for rounds > 1 usually, but it's safe for R1 too if empty.
           if (parseInt(round) > 1) {
+              const isFinalRound = parseInt(round) === totalRounds
               await generateDraw({
                   event_id: Number(event.id),
                   round: parseInt(round),
                   reseed: true,    // Always shuffle new rounds? Or maybe preserve order? User asked for fluid.
                   seed_runs: true
               })
-              toast.success(`Ronda ${round} preparada y filtrada.`)
+              if (isFinalRound) {
+                  toast.success(`Ronda final ${round} preparada. Los ropers se ordenaron de mayor a menor tiempo acumulado.`)
+              } else {
+                  toast.success(`Ronda ${round} preparada y filtrada.`)
+              }
           }
        } catch (e) {
           // Ignore "round started" errors silently, as that just means we are viewing history
