@@ -233,3 +233,30 @@ export const getDashboardStats = () =>
 
 export const getSeriesLogs = (seriesId: number) =>
   invoke<any[]>('get_series_logs', { seriesId });
+
+// Timer Capture
+export interface SerialPortInfo {
+  port_name: string;
+  port_type: string;
+}
+
+export interface TimerEvent {
+  time_seconds: number;
+  raw_text: string;
+  timestamp: string;
+}
+
+export const listSerialPorts = () =>
+  invoke<SerialPortInfo[]>('list_serial_ports');
+
+export const connectTimer = (portName: string) =>
+  invoke<void>('connect_timer', { portName });
+
+export const disconnectTimer = () =>
+  invoke<void>('disconnect_timer');
+
+export const isTimerConnected = () =>
+  invoke<boolean>('is_timer_connected');
+
+export const startTimerCapture = () =>
+  invoke<void>('start_timer_capture');

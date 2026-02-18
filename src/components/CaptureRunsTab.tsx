@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Play, Pause, RotateCcw, Save, ChevronLeft, ChevronRight, X, Clock,
-  CheckCircle2, Activity, Lock, Users,
+  CheckCircle2, Activity, Lock, Users, Usb, Timer,
 } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -17,7 +17,12 @@ import {
 } from './ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { toast } from 'sonner'
-import { getRunsExpanded, saveRun, getStandings, updateEventStatus, generateDraw } from '../lib/api'
+import { 
+  getRunsExpanded, saveRun, getStandings, updateEventStatus, generateDraw,
+  listSerialPorts, connectTimer, disconnectTimer, isTimerConnected, startTimerCapture,
+  type SerialPortInfo, type TimerEvent
+} from '../lib/api'
+import { listen } from '@tauri-apps/api/event'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,6 +76,13 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
   const [inputPin, setInputPin] = useState('')
   const [pinError, setPinError] = useState(false)
+  
+  // External Timer (Polaris) State
+  const [captureMode, setCaptureMode] = useState<'manual' | 'external'>('manual')
+  const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([])
+  const [selectedPort, setSelectedPort] = useState<string>('')
+  const [timerConnected, setTimerConnected] = useState(false)
+  const [showTimerSettings, setShowTimerSettings] = useState(false)
 
   const totalRounds = event?.rounds ?? 3
   const currentRun = selectedTeamIndex !== null ? runs[selectedTeamIndex] : null
@@ -149,16 +161,51 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   }, [runs, fetchStandingsData])
 
 
-  // Timer
+  // Timer (Manual Mode)
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined
-    if (timerRunning) {
+    if (timerRunning && captureMode === 'manual') {
       interval = setInterval(() => setTimerValue((prev) => prev + 10), 10)
     }
     return () => {
       if (interval) clearInterval(interval)
     }
-  }, [timerRunning])
+  }, [timerRunning, captureMode])
+
+  // External Timer Setup
+  useEffect(() => {
+    loadSerialPorts()
+    checkTimerConnection()
+  }, [])
+
+  // Listen for timer events from backend
+  useEffect(() => {
+    if (captureMode !== 'external' || !timerConnected) return
+
+    const unlisten = listen<TimerEvent>('timer-event', (event) => {
+      const timerEvent = event.payload
+      console.log('Timer event received:', timerEvent)
+      
+      // Auto-capture time
+      const timeInMs = timerEvent.time_seconds * 1000
+      setTimerValue(timeInMs)
+      setManualTimeInput(timerEvent.time_seconds.toFixed(3))
+      
+      toast.success(`Tiempo capturado: ${timerEvent.time_seconds.toFixed(3)}s`, {
+        description: timerEvent.raw_text.trim()
+      })
+      
+      // Optional: Auto-save if a team is selected
+      if (currentRun && selectedTeamIndex !== null) {
+        // Could auto-save here or let user confirm
+        // For now, just capture the time
+      }
+    })
+
+    return () => {
+      unlisten.then(fn => fn())
+    }
+  }, [captureMode, timerConnected, currentRun, selectedTeamIndex])
 
   // Shortcuts
   useEffect(() => {
@@ -385,6 +432,65 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     }
   }
 
+  // External Timer Functions
+  const loadSerialPorts = async () => {
+    try {
+      const ports = await listSerialPorts()
+      setSerialPorts(ports)
+      if (ports.length > 0 && !selectedPort) {
+        setSelectedPort(ports[0].port_name)
+      }
+    } catch (error) {
+      console.error('Error loading serial ports:', error)
+      toast.error('Error al listar puertos seriales')
+    }
+  }
+
+  const checkTimerConnection = async () => {
+    try {
+      const connected = await isTimerConnected()
+      setTimerConnected(connected)
+    } catch (error) {
+      console.error('Error checking timer connection:', error)
+    }
+  }
+
+  const handleConnectTimer = async () => {
+    if (!selectedPort) {
+      toast.error('Selecciona un puerto serial')
+      return
+    }
+
+    try {
+      await connectTimer(selectedPort)
+      await startTimerCapture()
+      setTimerConnected(true)
+      toast.success(`Timer conectado: ${selectedPort}`)
+    } catch (error) {
+      console.error('Error connecting timer:', error)
+      toast.error('Error al conectar timer: ' + error)
+    }
+  }
+
+  const handleDisconnectTimer = async () => {
+    try {
+      await disconnectTimer()
+      setTimerConnected(false)
+      toast.success('Timer desconectado')
+    } catch (error) {
+      console.error('Error disconnecting timer:', error)
+      toast.error('Error al desconectar timer')
+    }
+  }
+
+  const handleCaptureModeChange = (mode: 'manual' | 'external') => {
+    setCaptureMode(mode)
+    handleReset()
+    if (mode === 'external' && !timerConnected) {
+      setShowTimerSettings(true)
+    }
+  }
+
   // Round results
   const roundResults: RoundResult[] = runs
     .filter((r) => r.status === 'completed')
@@ -434,6 +540,61 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                 </Select>
              </div>
              
+             {/* Capture Mode Selector */}
+             <div className="flex items-center gap-2 bg-card border border-border rounded-xl p-1 px-3 shadow-sm">
+                <Label className="text-muted-foreground whitespace-nowrap">Modo:</Label>
+                <Select value={captureMode} onValueChange={(v) => handleCaptureModeChange(v as 'manual' | 'external')}>
+                  <SelectTrigger className="w-[140px] border-none shadow-none h-8 font-medium">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="manual">
+                      <div className="flex items-center gap-2">
+                        <Clock className="h-4 w-4" />
+                        <span>Manual</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="external">
+                      <div className="flex items-center gap-2">
+                        <Usb className="h-4 w-4" />
+                        <span>Timer Externo</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+             </div>
+
+             {/* Timer Status Badge */}
+             {captureMode === 'external' && (
+                <Badge 
+                  variant={timerConnected ? "default" : "secondary"}
+                  className={timerConnected ? "bg-green-500 text-white" : ""}
+                >
+                  {timerConnected ? (
+                    <>
+                      <Timer className="mr-1 h-3 w-3" /> Timer Conectado
+                    </>
+                  ) : (
+                    <>
+                      <Timer className="mr-1 h-3 w-3" /> Timer Desconectado
+                    </>
+                  )}
+                </Badge>
+             )}
+
+             {/* Timer Settings Button */}
+             {captureMode === 'external' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowTimerSettings(!showTimerSettings)}
+                  className="h-8"
+                >
+                  <Usb className="mr-2 h-4 w-4" />
+                  Configurar Timer
+                </Button>
+             )}
+             
              {isLocked && (
                 <Badge className="bg-accent text-primary border-accent animate-in fade-in">
                     <Lock className="mr-1 h-3 w-3" /> Locked
@@ -441,6 +602,75 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
              )}
         </div>
       </div>
+
+      {/* Timer Settings Panel */}
+      {showTimerSettings && captureMode === 'external' && (
+        <div className="mb-4 bg-card border border-border rounded-xl p-4 shadow-sm animate-in slide-in-from-top-2">
+          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <Usb className="h-5 w-5" />
+            Configuración del Timer Polaris
+          </h3>
+          <div className="space-y-4">
+            <div className="flex gap-4 items-end">
+              <div className="flex-1">
+                <Label htmlFor="serial-port">Puerto Serial (COM)</Label>
+                <Select value={selectedPort} onValueChange={setSelectedPort}>
+                  <SelectTrigger id="serial-port" className="w-full">
+                    <SelectValue placeholder="Seleccionar puerto" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {serialPorts.map((port) => (
+                      <SelectItem key={port.port_name} value={port.port_name}>
+                        {port.port_name} ({port.port_type})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  1200 baud, 8N1 - Compatible con FarmTek Polaris
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={loadSerialPorts}
+                className="h-10"
+              >
+                Actualizar Lista
+              </Button>
+            </div>
+            
+            <div className="flex gap-2">
+              {!timerConnected ? (
+                <Button
+                  onClick={handleConnectTimer}
+                  disabled={!selectedPort}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  <Usb className="mr-2 h-4 w-4" />
+                  Conectar Timer
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleDisconnectTimer}
+                  variant="destructive"
+                >
+                  Desconectar Timer
+                </Button>
+              )}
+            </div>
+
+            <div className="bg-muted/50 rounded-lg p-3 text-sm">
+              <h4 className="font-medium mb-2">Instrucciones:</h4>
+              <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
+                <li>Conecta el cable del Timer Console al puerto USB de tu computadora</li>
+                <li>Selecciona el puerto COM correcto de la lista</li>
+                <li>Haz clic en "Conectar Timer"</li>
+                <li>Los tiempos se capturarán automáticamente cuando el timer se detenga</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 flex gap-6 overflow-hidden min-h-0">
         {/* LEFT: Teams list */}
@@ -562,29 +792,41 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
 
               {/* Mode Toggle */}
               <div className="flex items-center justify-center gap-3 mb-6 p-4 bg-muted/30 rounded-xl border border-border/50">
-                <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
-                  !isManualMode ? 'text-foreground' : 'text-muted-foreground'
-                }`}>
-                  Cronómetro
-                </Label>
-                <Switch
-                  id="mode-switch"
-                  checked={isManualMode}
-                  onCheckedChange={(checked) => {
-                    setIsManualMode(checked)
-                    handleReset()
-                  }}
-                />
-                <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
-                  isManualMode ? 'text-foreground' : 'text-muted-foreground'
-                }`}>
-                  Entrada Manual
-                </Label>
+                {captureMode === 'manual' && (
+                  <>
+                    <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
+                      !isManualMode ? 'text-foreground' : 'text-muted-foreground'
+                    }`}>
+                      Cronómetro
+                    </Label>
+                    <Switch
+                      id="mode-switch"
+                      checked={isManualMode}
+                      onCheckedChange={(checked) => {
+                        setIsManualMode(checked)
+                        handleReset()
+                      }}
+                    />
+                    <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
+                      isManualMode ? 'text-foreground' : 'text-muted-foreground'
+                    }`}>
+                      Entrada Manual
+                    </Label>
+                  </>
+                )}
+                {captureMode === 'external' && (
+                  <div className="flex items-center gap-2">
+                    <Timer className="h-5 w-5 text-primary" />
+                    <span className="font-medium text-foreground">
+                      {timerConnected ? 'Esperando tiempo del Timer Polaris...' : 'Timer no conectado'}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                   {/* Timer Display or Manual Input */}
-                  {!isManualMode ? (
+                  {captureMode === 'manual' && !isManualMode ? (
                     <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden group">
                         <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
                           <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
@@ -600,7 +842,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                     <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden min-h-[200px]">
                         <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
                           <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
-                              <Clock className="w-3 h-3" /> Entrada Manual
+                              <Clock className="w-3 h-3" /> {captureMode === 'external' ? 'Timer Externo' : 'Entrada Manual'}
                           </div>
                         </div>
                         
@@ -608,7 +850,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                           <input
                             type="number"
                             step="0.001"
-                            value={manualTimeInput}
+                            value={manualTimeInput || (timerValue > 0 ? (timerValue / 1000).toFixed(3) : '')}
                             onChange={(e) => setManualTimeInput(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
@@ -617,15 +859,18 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                               }
                             }}
                             placeholder="0.000"
+                            readOnly={captureMode === 'external'}
                             className="text-5xl lg:text-6xl font-mono font-bold text-center border-none bg-transparent text-primary tracking-tighter tabular-nums outline-none w-full [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                           />
-                          <p className="text-center text-background/60 text-xs font-mono mt-3 uppercase tracking-widest">segundos</p>
+                          <p className="text-center text-background/60 text-xs font-mono mt-3 uppercase tracking-widest">
+                            {captureMode === 'external' ? 'Capturado desde Polaris' : 'segundos'}
+                          </p>
                         </div>
                     </div>
                   )}
 
                    {/* Controls */}
-                   {!isManualMode ? (
+                   {captureMode === 'manual' && !isManualMode ? (
                      <div className="flex flex-col justify-center gap-4">
                           <Button
                               onClick={handleStartStop}

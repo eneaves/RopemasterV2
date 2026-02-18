@@ -9,11 +9,21 @@ use sqlx::{
 };
 use std::path::PathBuf;
 use rust_xlsxwriter::*;
-use tauri::{Manager, State};
+use tauri::{Manager, State, Emitter};
+
+mod timer_capture;
+use timer_capture::PolarisTimerCapture;
+use std::sync::{Arc, Mutex};
+use once_cell::sync::Lazy;
 
 /* ------------------- STATE ------------------- */
 #[derive(Clone)]
 struct Db(SqlitePool);
+
+// Global timer capture instance
+static TIMER_CAPTURE: Lazy<Arc<Mutex<PolarisTimerCapture>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(PolarisTimerCapture::new()))
+});
 
 /* ------------------- HELPERS ------------------- */
 async fn ensure_event_unlocked(pool: &SqlitePool, event_id: i64) -> Result<(), String> {
@@ -2340,6 +2350,70 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
     Ok(())
 }
 
+/* ------------------- TIMER CAPTURE COMMANDS ------------------- */
+
+#[derive(serde::Serialize)]
+struct SerialPortInfo {
+    port_name: String,
+    port_type: String,
+}
+
+#[tauri::command]
+async fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    let ports = PolarisTimerCapture::list_ports().map_err(|e| e.to_string())?;
+    
+    Ok(ports.into_iter().map(|p| SerialPortInfo {
+        port_name: p.port_name.clone(),
+        port_type: match p.port_type {
+            serialport::SerialPortType::UsbPort(_) => "USB".to_string(),
+            serialport::SerialPortType::BluetoothPort => "Bluetooth".to_string(),
+            serialport::SerialPortType::PciPort => "PCI".to_string(),
+            serialport::SerialPortType::Unknown => "Unknown".to_string(),
+        },
+    }).collect())
+}
+
+#[tauri::command]
+async fn connect_timer(port_name: String) -> Result<(), String> {
+    let timer = TIMER_CAPTURE.lock().unwrap();
+    timer.connect(&port_name).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn disconnect_timer() -> Result<(), String> {
+    let timer = TIMER_CAPTURE.lock().unwrap();
+    timer.disconnect();
+    Ok(())
+}
+
+#[tauri::command]
+async fn is_timer_connected() -> Result<bool, String> {
+    let timer = TIMER_CAPTURE.lock().unwrap();
+    Ok(timer.is_connected())
+}
+
+#[tauri::command]
+async fn start_timer_capture(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let timer = TIMER_CAPTURE.lock().unwrap();
+    
+    // Start capture (gets receiver)
+    let mut rx = timer.start_capture().map_err(|e| e.to_string())?;
+    drop(timer); // Release lock
+    
+    // Spawn task to forward events to frontend
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            // Emit event to frontend
+            let _ = app_handle.emit("timer-event", &event);
+            tracing::info!("Timer event: {} sec ({})", event.time_seconds, event.raw_text.trim());
+        }
+        tracing::info!("Timer capture ended");
+    });
+    
+    Ok(())
+}
+
 /* ------------------- BOOTSTRAP ------------------- */
 fn resolve_db_path(app: &tauri::AppHandle) -> Result<PathBuf> {
     let dir = app
@@ -2436,7 +2510,13 @@ pub fn run() {
             // dashboard
             get_recent_activity,
             get_series_logs,
-            get_dashboard_stats
+            get_dashboard_stats,
+            // timer capture
+            list_serial_ports,
+            connect_timer,
+            disconnect_timer,
+            is_timer_connected,
+            start_timer_capture
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri");
