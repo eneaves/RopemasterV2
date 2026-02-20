@@ -4,16 +4,31 @@ import { Progress } from './ui/progress'
 import { getSeries, getEvents, createEvent } from '@/lib/api'
 import { NewEventModal } from './NewEventModal'
 // NO cambiar estilos ni estructura, solo reemplazar el contenido del placeholder con el calendario funcional.
-import { Calendar, momentLocalizer } from 'react-big-calendar'
+import { Calendar, momentLocalizer, type NavigateAction, type View } from 'react-big-calendar'
 import moment from 'moment'
 import 'moment/locale/es'
 import 'react-big-calendar/lib/css/react-big-calendar.css'
 import { toast } from 'sonner'
+import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-react'
 
 moment.locale('es')
 const localizer = momentLocalizer(moment)
 
-function CalendarWrapper({ events }: { events: any[] }) {
+const CALENDAR_VIEWS: { value: View; label: string }[] = [
+  { value: 'month', label: 'Mes' },
+  { value: 'week', label: 'Semana' },
+  { value: 'day', label: 'Día' },
+]
+
+type CalendarWrapperProps = {
+  events: any[]
+  date: Date
+  view: View
+  onNavigate: (date: Date, view: View, action: NavigateAction) => void
+  onView: (view: View) => void
+}
+
+function CalendarWrapper({ events, date, view, onNavigate, onView }: CalendarWrapperProps) {
   const calendarEvents = events
     .map((e) => {
       // expect e.start / e.end or e.date
@@ -57,10 +72,15 @@ function CalendarWrapper({ events }: { events: any[] }) {
     <Calendar
       localizer={localizer}
       events={calendarEvents}
+      date={date}
+      view={view}
+      onNavigate={onNavigate}
+      onView={onView}
       startAccessor="start"
       endAccessor="end"
       defaultView="month"
-      views={["month", "week", "day"]}
+      toolbar={false}
+      views={CALENDAR_VIEWS.map((option) => option.value)}
       style={{ height: '100%' }}
       eventPropGetter={eventStyleGetter}
       onSelectEvent={(e: any) => toast.info(`${e.title} — ${moment(e.start).format('LL')} (${e.status})`)}
@@ -75,6 +95,8 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isNewEventOpen, setIsNewEventOpen] = useState(false)
+  const [calendarDate, setCalendarDate] = useState<Date>(new Date())
+  const [calendarView, setCalendarView] = useState<View>('month')
 
   function mapSeriesRow(row: any) {
     return { id: String(row.id), name: row.name ?? '' }
@@ -170,6 +192,24 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
   const completed = countBy('completed')
   const draft = countBy('draft')
   const pct = (n: number) => (total ? Math.round((n * 100) / total) : 0)
+  const viewToUnit = (view: View): moment.unitOfTime.DurationConstructor => {
+    if (view === 'week') return 'week'
+    if (view === 'day') return 'day'
+    return 'month'
+  }
+  const shiftCalendarDate = (direction: 'prev' | 'next') => {
+    const amount = direction === 'next' ? 1 : -1
+    const unit = viewToUnit(calendarView)
+    setCalendarDate((current) => moment(current).add(amount, unit).toDate())
+  }
+  const handleCalendarNavigate = (date: Date, view: View, _action: NavigateAction) => {
+    setCalendarDate(date)
+    if (view && view !== calendarView) setCalendarView(view)
+  }
+  const handleCalendarViewChange = (view: View) => {
+    setCalendarView(view)
+  }
+  const resetCalendarToToday = () => setCalendarDate(new Date())
 
   const handleCreateEvent = async (evt: any) => {
     const sid = selectedSeriesId === 'ALL' ? undefined : Number(selectedSeriesId)
@@ -252,10 +292,44 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
         {error && <div className="mb-2 rounded-md bg-red-50 p-2 text-sm text-red-700">{error}</div>}
 
         <div className="bg-card border border-border rounded-xl p-4 shadow-sm">
+          <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Período</p>
+                <p className="flex items-center gap-2 text-lg font-semibold capitalize text-foreground">
+                  <CalendarIcon className="h-4 w-4 text-muted-foreground" />
+                  {moment(calendarDate).format('MMMM YYYY')}
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" onClick={resetCalendarToToday}>
+                Hoy
+              </Button>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="icon" aria-label="Período anterior" onClick={() => shiftCalendarDate('prev')}>
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" size="icon" aria-label="Período siguiente" onClick={() => shiftCalendarDate('next')}>
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {CALENDAR_VIEWS.map((option) => (
+                <Button
+                  key={option.value}
+                  size="sm"
+                  variant={calendarView === option.value ? 'default' : 'outline'}
+                  onClick={() => handleCalendarViewChange(option.value)}
+                >
+                  {option.label}
+                </Button>
+              ))}
+            </div>
+          </div>
           {/* Placeholder del calendario: aquí reemplazar por un calendario real en futuras iteraciones */}
           <div className="h-[520px] rounded-md border border-gray-200 bg-white overflow-hidden">
             {/* NO cambiar estilos ni estructura, solo reemplazar el contenido del placeholder con el calendario funcional. */}
-            <CalendarWrapper events={events} />
+            <CalendarWrapper events={events} date={calendarDate} view={calendarView} onNavigate={handleCalendarNavigate} onView={handleCalendarViewChange} />
           </div>
 
           <div className="mt-6 flex justify-center gap-6">

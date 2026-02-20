@@ -250,6 +250,7 @@ export const exportEvent = (eventId: number, options: {
   standings: boolean;
   payoffs: boolean;
   event_logs: boolean;
+  include_blocked?: boolean;
   file_path: string;
 }) => invoke<void>('export_event_to_excel', { eventId, options });
 

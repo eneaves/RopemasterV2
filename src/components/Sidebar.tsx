@@ -7,7 +7,6 @@ import {
   DollarSign,
   Download,
   Settings,
-  Clock,
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -21,7 +20,6 @@ export function Sidebar({ activeItem, onItemClick }: SidebarProps) {
     { id: 'ropers', label: 'Ropers', icon: Trophy },
     { id: 'eventos', label: 'Eventos', icon: Calendar },
     { id: 'equipos', label: 'Equipos', icon: Users },
-    { id: 'captura', label: 'Captura', icon: Clock },
     { id: 'resultados', label: 'Resultados', icon: BarChart3 },
     { id: 'payoffs', label: 'Payoffs', icon: DollarSign },
     { id: 'exportar', label: 'Exportar', icon: Download },

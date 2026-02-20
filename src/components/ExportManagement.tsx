@@ -23,10 +23,47 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { toast } from 'sonner'
 import type { Series, Event } from '../types'
 
-// Mock history for now as backend doesn't persist export history specifically
-const mockExports = [
-  { id: 'e1', date: '2025-02-04', series: 'Winter Classic', event: '#9 Roping', type: 'Full XLSX', size: '1.2 MB', status: 'Completado' },
-]
+type ExportSelectionOptions = Omit<Parameters<typeof exportEvent>[1], 'file_path'>
+type SectionToggleState = Omit<ExportSelectionOptions, 'include_blocked'>
+
+interface ExportHistoryRecord {
+  id: string
+  timestamp: string
+  seriesName: string
+  eventName: string
+  eventId: number
+  mode: 'full' | 'custom'
+  options: ExportSelectionOptions
+}
+
+const HISTORY_STORAGE_KEY = 'rm-export-history-v1'
+
+const DEFAULT_FULL_EXPORT: SectionToggleState = {
+  overview: true,
+  standings: true,
+  run_order: true,
+  teams: true,
+  payoffs: true,
+  event_logs: true,
+}
+
+const SECTION_LABELS: Record<keyof SectionToggleState, string> = {
+  overview: 'Resumen',
+  standings: 'Standings',
+  run_order: 'Rondas',
+  teams: 'Equipos',
+  payoffs: 'Payoffs',
+  event_logs: 'Logs',
+}
+
+const createHistoryId = () => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `export-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+const sanitizeForFilename = (value: string) => value.replace(/[^a-z0-9]+/gi, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '')
 
 export function ExportManagement() {
   const [seriesList, setSeriesList] = useState<Series[]>([])
@@ -35,15 +72,16 @@ export function ExportManagement() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
 
   const [includeBlocked, setIncludeBlocked] = useState(false)
-  const [types, setTypes] = useState({ 
-    overview: true, 
-    standings: true, 
-    run_order: true, 
-    teams: false, 
-    payoffs: true, 
-    event_logs: false 
+  const [sectionToggles, setSectionToggles] = useState<SectionToggleState>({
+    overview: true,
+    standings: true,
+    run_order: true,
+    teams: false,
+    payoffs: true,
+    event_logs: false,
   })
   const [query, setQuery] = useState('')
+  const [exportHistory, setExportHistory] = useState<ExportHistoryRecord[]>([])
 
   // Load initial data
   useEffect(() => {
@@ -68,13 +106,104 @@ export function ExportManagement() {
     }
   }, [selectedSeriesId])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return mockExports.filter((r) => !q || (r.series + ' ' + r.event).toLowerCase().includes(q))
-  }, [query])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const stored = window.localStorage.getItem(HISTORY_STORAGE_KEY)
+      if (stored) {
+        const parsed = JSON.parse(stored) as ExportHistoryRecord[]
+        setExportHistory(parsed)
+      }
+    } catch (error) {
+      console.warn('No fue posible leer el historial de exportaciones', error)
+    }
+  }, [])
 
-  function toggleType(k: keyof typeof types) {
-    setTypes((t) => ({ ...t, [k]: !t[k] }))
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(exportHistory))
+    } catch (error) {
+      console.warn('No fue posible guardar el historial de exportaciones', error)
+    }
+  }, [exportHistory])
+
+  const filteredHistory = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return [...exportHistory]
+      .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+      .filter((record) => {
+        if (!q) return true
+        return `${record.seriesName} ${record.eventName}`.toLowerCase().includes(q)
+      })
+  }, [exportHistory, query])
+
+  function toggleType(k: keyof SectionToggleState) {
+    setSectionToggles((prev) => ({ ...prev, [k]: !prev[k] }))
+  }
+
+  const appendHistoryRecord = (entry: Omit<ExportHistoryRecord, 'id' | 'timestamp'>) => {
+    const snapshot: ExportHistoryRecord = {
+      ...entry,
+      id: createHistoryId(),
+      timestamp: new Date().toISOString(),
+      options: { ...entry.options },
+    }
+    setExportHistory((prev) => [snapshot, ...prev].slice(0, 25))
+  }
+
+  const buildOptionsPayload = (full: boolean): ExportSelectionOptions => {
+    const base = full ? DEFAULT_FULL_EXPORT : sectionToggles
+    return {
+      ...base,
+      include_blocked: includeBlocked,
+    }
+  }
+
+  const describeRecordType = (record: ExportHistoryRecord) => {
+    const enabled = Object.entries(SECTION_LABELS)
+      .filter(([key]) => record.options[key as keyof SectionToggleState])
+      .map(([, label]) => label)
+    const isFull =
+      record.mode === 'full' || enabled.length === Object.keys(SECTION_LABELS).length
+    const baseLabel = isFull ? 'XLSX Completo' : `Selección (${enabled.join(', ')})`
+    return record.options.include_blocked ? `${baseLabel} + bloqueados` : baseLabel
+  }
+
+  const formatTimestamp = (iso: string) => {
+    const date = new Date(iso)
+    if (Number.isNaN(date.getTime())) return iso
+    return date.toLocaleString()
+  }
+
+  const executeExport = async (
+    eventId: number,
+    optionsPayload: ExportSelectionOptions,
+    metadata: { mode: 'full' | 'custom'; seriesName: string; eventName: string }
+  ) => {
+    const safeSeries = sanitizeForFilename(metadata.seriesName || 'Serie')
+    const safeEvent = sanitizeForFilename(metadata.eventName || 'Evento')
+    const defaultPath = `${safeSeries || 'Serie'}_${safeEvent || 'Evento'}.xlsx`
+    const filePath = await save({
+      filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+      defaultPath,
+    })
+    if (!filePath) return
+
+    try {
+      await exportEvent(eventId, { ...optionsPayload, file_path: filePath })
+      toast.success('Exportación completada exitosamente')
+      appendHistoryRecord({
+        eventId,
+        options: { ...optionsPayload },
+        mode: metadata.mode,
+        seriesName: metadata.seriesName,
+        eventName: metadata.eventName,
+      })
+    } catch (error) {
+      console.error(error)
+      toast.error('Error al exportar el archivo')
+    }
   }
 
   const handleExport = async (full: boolean = false) => {
@@ -83,32 +212,44 @@ export function ExportManagement() {
       return
     }
 
+    if (!full && !Object.values(sectionToggles).some(Boolean)) {
+      toast.error('Selecciona al menos un módulo para exportar')
+      return
+    }
+
+    const eventId = parseInt(selectedEventId, 10)
+    const eventData = eventsList.find((e) => e.id === eventId)
+    const seriesData = seriesList.find((s) => s.id.toString() === selectedSeriesId)
+    const optionsPayload = buildOptionsPayload(full)
+
+    await executeExport(eventId, optionsPayload, {
+      mode: full ? 'full' : 'custom',
+      seriesName: seriesData?.name ?? 'Serie',
+      eventName: eventData?.name ?? `Evento ${selectedEventId}`,
+    })
+  }
+
+  const handleHistoryReexport = async (record: ExportHistoryRecord) => {
+    await executeExport(record.eventId, { ...record.options }, {
+      mode: record.mode,
+      seriesName: record.seriesName,
+      eventName: record.eventName,
+    })
+  }
+
+  const handleRefresh = async () => {
     try {
-      const filePath = await save({
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-        defaultPath: `Resultados_Evento_${selectedEventId}.xlsx`
-      })
-
-      if (!filePath) return
-
-      const options = full ? {
-        overview: true,
-        teams: true,
-        run_order: true,
-        standings: true,
-        payoffs: true,
-        event_logs: true,
-        file_path: filePath
-      } : {
-        ...types,
-        file_path: filePath
+      const series = await getSeries()
+      setSeriesList(series)
+      if (selectedSeriesId) {
+        const refreshedEvents = await getEvents(parseInt(selectedSeriesId, 10))
+        setEventsList(refreshedEvents)
+      } else {
+        setEventsList([])
       }
-
-      await exportEvent(parseInt(selectedEventId), options)
-      toast.success('Exportación completada exitosamente')
-    } catch (e) {
-      console.error(e)
-      toast.error('Error al exportar el archivo')
+    } catch (error) {
+      console.error(error)
+      toast.error('No se pudo refrescar la información')
     }
   }
 
@@ -122,7 +263,7 @@ export function ExportManagement() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Button variant="ghost" onClick={() => setSelectedSeriesId(selectedSeriesId)}>Refrescar</Button>
+            <Button variant="ghost" onClick={handleRefresh}>Refrescar</Button>
           </div>
         </div>
 
@@ -150,27 +291,27 @@ export function ExportManagement() {
           <div className="mt-6">
             <div className="text-sm font-medium mb-2">Tipo de Exportación</div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <button type="button" onClick={() => toggleType('standings')} className={`text-left rounded-md p-4 border ${types.standings ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
+              <button type="button" onClick={() => toggleType('standings')} className={`text-left rounded-md p-4 border ${sectionToggles.standings ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
                 <div className="font-medium">Resultados globales</div>
                 <div className="text-xs text-muted-foreground">Standings completos del evento</div>
               </button>
 
-              <button type="button" onClick={() => toggleType('run_order')} className={`text-left rounded-md p-4 border ${types.run_order ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
+              <button type="button" onClick={() => toggleType('run_order')} className={`text-left rounded-md p-4 border ${sectionToggles.run_order ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
                 <div className="font-medium">Resultados por ronda</div>
                 <div className="text-xs text-muted-foreground">Detalle de cada ronda</div>
               </button>
 
-              <button type="button" onClick={() => toggleType('teams')} className={`text-left rounded-md p-4 border ${types.teams ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
+              <button type="button" onClick={() => toggleType('teams')} className={`text-left rounded-md p-4 border ${sectionToggles.teams ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
                 <div className="font-medium">Equipos</div>
                 <div className="text-xs text-muted-foreground">Lista de equipos participantes</div>
               </button>
 
-              <button type="button" onClick={() => toggleType('payoffs')} className={`text-left rounded-md p-4 border ${types.payoffs ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
+              <button type="button" onClick={() => toggleType('payoffs')} className={`text-left rounded-md p-4 border ${sectionToggles.payoffs ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
                 <div className="font-medium">Payoffs</div>
                 <div className="text-xs text-muted-foreground">Distribución de premios</div>
               </button>
 
-              <button type="button" onClick={() => toggleType('event_logs')} className={`text-left rounded-md p-4 border ${types.event_logs ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
+              <button type="button" onClick={() => toggleType('event_logs')} className={`text-left rounded-md p-4 border ${sectionToggles.event_logs ? 'border-orange-200 bg-orange-50' : 'border-border bg-card'}`}>
                 <div className="font-medium">Logs / Exclusiones</div>
                 <div className="text-xs text-muted-foreground">Registro de cambios y exclusiones</div>
               </button>
@@ -214,19 +355,31 @@ export function ExportManagement() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((r) => (
-                  <TableRow key={r.id}>
-                    <TableCell className="text-sm text-muted-foreground">{r.date}</TableCell>
-                    <TableCell>{r.series}</TableCell>
-                    <TableCell>{r.event}</TableCell>
-                    <TableCell>{r.type}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{r.size}</TableCell>
-                    <TableCell>
-                      {r.status === 'Completado' && <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">Completado</Badge>}
+                {filteredHistory.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                      No hay exportaciones registradas.
                     </TableCell>
-                    <TableCell className="text-right text-orange-600">Re-exportar</TableCell>
                   </TableRow>
-                ))}
+                ) : (
+                  filteredHistory.map((record) => (
+                    <TableRow key={record.id}>
+                      <TableCell className="text-sm text-muted-foreground">{formatTimestamp(record.timestamp)}</TableCell>
+                      <TableCell>{record.seriesName}</TableCell>
+                      <TableCell>{record.eventName}</TableCell>
+                      <TableCell>{describeRecordType(record)}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">—</TableCell>
+                      <TableCell>
+                        <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">Completado</Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button variant="link" className="px-0 text-orange-600" onClick={() => handleHistoryReexport(record)}>
+                          Re-exportar
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </div>
