@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rust_xlsxwriter::*;
 use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::{
@@ -8,22 +9,30 @@ use sqlx::{
     FromRow, Sqlite, SqlitePool, Transaction,
 };
 use std::path::PathBuf;
-use rust_xlsxwriter::*;
-use tauri::{Manager, State, Emitter};
+use tauri::{Emitter, Manager, State};
 
 mod timer_capture;
-use timer_capture::PolarisTimerCapture;
-use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex};
+use timer_capture::PolarisTimerCapture;
+
+mod license;
 
 /* ------------------- STATE ------------------- */
 #[derive(Clone)]
-struct Db(SqlitePool);
+struct Db(SqlitePool, license::LicenseState);
+
+impl Db {
+    fn require_license(&self) -> Result<(), String> {
+        license::ensure_active(&self.1)
+            .map(|_| ())
+            .map_err(|err| err.message)
+    }
+}
 
 // Global timer capture instance
-static TIMER_CAPTURE: Lazy<Arc<Mutex<PolarisTimerCapture>>> = Lazy::new(|| {
-    Arc::new(Mutex::new(PolarisTimerCapture::new()))
-});
+static TIMER_CAPTURE: Lazy<Arc<Mutex<PolarisTimerCapture>>> =
+    Lazy::new(|| Arc::new(Mutex::new(PolarisTimerCapture::new())));
 
 /* ------------------- HELPERS ------------------- */
 async fn ensure_event_unlocked(pool: &SqlitePool, event_id: i64) -> Result<(), String> {
@@ -53,7 +62,7 @@ async fn log_audit(
         r#"
         INSERT INTO audit_log (action, entity_type, entity_id, metadata, created_at)
         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        "#
+        "#,
     )
     .bind(action)
     .bind(entity_type)
@@ -70,7 +79,10 @@ async fn log_audit(
 
 /* ------------------- HEALTH ------------------- */
 #[tauri::command]
-async fn health_check(db: State<'_, Db>) -> Result<String, String> {
+async fn health_check(
+    db: State<'_, Db>,
+) -> Result<String, String> {
+    db.require_license()?;
     sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&db.0)
         .await
@@ -104,6 +116,7 @@ struct SeriesRow {
 
 #[tauri::command]
 async fn list_series(db: State<'_, Db>) -> Result<Vec<SeriesRow>, String> {
+    db.require_license()?;
     sqlx::query_as::<_, SeriesRow>(
         r#"
         SELECT 
@@ -134,6 +147,7 @@ async fn list_series(db: State<'_, Db>) -> Result<Vec<SeriesRow>, String> {
 
 #[tauri::command]
 async fn create_series(db: State<'_, Db>, payload: NewSeries) -> Result<i64, String> {
+    db.require_license()?;
     let res = sqlx::query(
         r#"
         INSERT INTO series (name, season, status, start_date, end_date)
@@ -150,7 +164,14 @@ async fn create_series(db: State<'_, Db>, payload: NewSeries) -> Result<i64, Str
     .map_err(|e| e.to_string())?;
 
     let id = res.last_insert_rowid();
-    log_audit(&db.0, "create_series", "series", Some(id), Some(payload.name)).await?;
+    log_audit(
+        &db.0,
+        "create_series",
+        "series",
+        Some(id),
+        Some(payload.name),
+    )
+    .await?;
     Ok(id)
 }
 
@@ -164,7 +185,12 @@ struct UpdateSeries {
 }
 
 #[tauri::command]
-async fn update_series(db: State<'_, Db>, id: i64, patch: UpdateSeries) -> Result<(), String> {
+async fn update_series(
+    db: State<'_, Db>,
+    id: i64,
+    patch: UpdateSeries,
+) -> Result<(), String> {
+    db.require_license()?;
     // verify series exists
     let exists: Option<i64> =
         sqlx::query_scalar("SELECT id FROM series WHERE id = ?1 AND is_deleted = 0")
@@ -271,6 +297,7 @@ struct EventRow {
 
 #[tauri::command]
 async fn list_events(db: State<'_, Db>, series_id: Option<i64>) -> Result<Vec<EventRow>, String> {
+    db.require_license()?;
     if let Some(sid) = series_id {
         sqlx::query_as::<_, EventRow>(
             r#"
@@ -329,6 +356,7 @@ async fn list_events(db: State<'_, Db>, series_id: Option<i64>) -> Result<Vec<Ev
 
 #[tauri::command]
 async fn create_event(db: State<'_, Db>, payload: NewEvent) -> Result<i64, String> {
+    db.require_license()?;
     // Normalize status values coming from the frontend. DB CHECK allows
     // only ('active','upcoming','completed','locked'). Map common FE values
     // to the canonical set to avoid constraint errors (e.g. 'draft' -> 'upcoming').
@@ -368,6 +396,7 @@ async fn create_event(db: State<'_, Db>, payload: NewEvent) -> Result<i64, Strin
 
 #[tauri::command]
 async fn update_event_status(db: State<'_, Db>, id: i64, status: String) -> Result<(), String> {
+    db.require_license()?;
     let normalized_status = match status.as_str() {
         "draft" => "upcoming".to_string(),
         "finalized" => "completed".to_string(),
@@ -381,8 +410,15 @@ async fn update_event_status(db: State<'_, Db>, id: i64, status: String) -> Resu
         .execute(&db.0)
         .await
         .map_err(|e| e.to_string())?;
-    
-    log_audit(&db.0, "update_event_status", "event", Some(id), Some(normalized_status)).await?;
+
+    log_audit(
+        &db.0,
+        "update_event_status",
+        "event",
+        Some(id),
+        Some(normalized_status),
+    )
+    .await?;
     Ok(())
 }
 
@@ -401,7 +437,12 @@ struct EventPatch {
 }
 
 #[tauri::command]
-async fn update_event(db: State<'_, Db>, id: i64, patch: EventPatch) -> Result<(), String> {
+async fn update_event(
+    db: State<'_, Db>,
+    id: i64,
+    patch: EventPatch,
+) -> Result<(), String> {
+    db.require_license()?;
     let pool = &db.0;
 
     // comprobar existencia
@@ -461,7 +502,10 @@ async fn update_event(db: State<'_, Db>, id: i64, patch: EventPatch) -> Result<(
         has_any = true;
     }
     if let Some(pa) = patch.payoff_allocation {
-        builder.push("payoff_allocation = ").push_bind(pa).push(", ");
+        builder
+            .push("payoff_allocation = ")
+            .push_bind(pa)
+            .push(", ");
         has_any = true;
     }
     if let Some(pin) = patch.admin_pin {
@@ -482,13 +526,17 @@ async fn update_event(db: State<'_, Db>, id: i64, patch: EventPatch) -> Result<(
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
-    
+
     log_audit(pool, "update_event", "event", Some(id), None).await?;
     Ok(())
 }
 
 #[tauri::command]
-async fn delete_event(db: State<'_, Db>, id: i64) -> Result<(), String> {
+async fn delete_event(
+    db: State<'_, Db>,
+    id: i64,
+) -> Result<(), String> {
+    db.require_license()?;
     let pool = &db.0;
     // Verificar existencia y estado
     let status_opt: Option<String> =
@@ -522,7 +570,11 @@ async fn delete_event(db: State<'_, Db>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn duplicate_event(db: State<'_, Db>, id: i64) -> Result<i64, String> {
+async fn duplicate_event(
+    db: State<'_, Db>,
+    id: i64,
+) -> Result<i64, String> {
+    db.require_license()?;
     let pool = &db.0;
 
     let row = sqlx::query(
@@ -572,12 +624,23 @@ async fn duplicate_event(db: State<'_, Db>, id: i64) -> Result<i64, String> {
         .map_err(|e| e.to_string())?;
 
     let new_id = res.last_insert_rowid();
-    log_audit(pool, "duplicate_event", "event", Some(new_id), Some(format!("Copied from {}", id))).await?;
+    log_audit(
+        pool,
+        "duplicate_event",
+        "event",
+        Some(new_id),
+        Some(format!("Copied from {}", id)),
+    )
+    .await?;
     Ok(new_id)
 }
 
 #[tauri::command]
-async fn lock_event(db: State<'_, Db>, event_id: i64) -> Result<(), String> {
+async fn lock_event(
+    db: State<'_, Db>,
+    event_id: i64,
+) -> Result<(), String> {
+    db.require_license()?;
     sqlx::query(
         "UPDATE event SET status = 'locked', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1"
     )
@@ -585,7 +648,7 @@ async fn lock_event(db: State<'_, Db>, event_id: i64) -> Result<(), String> {
     .execute(&db.0)
     .await
     .map_err(|e| e.to_string())?;
-    
+
     log_audit(&db.0, "lock_event", "event", Some(event_id), None).await?;
     Ok(())
 }
@@ -607,6 +670,7 @@ async fn list_payoff_rules(
     db: State<'_, Db>,
     event_id: Option<i64>,
 ) -> Result<Vec<PayoffRuleRow>, String> {
+    db.require_license()?;
     if let Some(eid) = event_id {
         sqlx::query_as::<_, PayoffRuleRow>(
             r#"
@@ -637,6 +701,7 @@ async fn list_payoff_rules(
 
 #[tauri::command]
 async fn delete_payoff_rule(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    db.require_license()?;
     let res = sqlx::query("UPDATE payoff_rule SET is_active = 0 WHERE id = ?1")
         .bind(id)
         .execute(&db.0)
@@ -698,7 +763,14 @@ async fn create_payoff_rule(db: State<'_, Db>, rule: NewPayoffRule) -> Result<i6
         .await
         .map_err(|e| e.to_string())?;
         let new_id = res.last_insert_rowid();
-        log_audit(&db.0, "create_payoff_rule", "payoff_rule", Some(new_id), None).await?;
+        log_audit(
+            &db.0,
+            "create_payoff_rule",
+            "payoff_rule",
+            Some(new_id),
+            None,
+        )
+        .await?;
         Ok(new_id)
     }
 }
@@ -734,7 +806,7 @@ async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<Payout
             0.0 as pot
         FROM event 
         WHERE id = ?1
-        "#
+        "#,
     )
     .bind(event_id)
     .fetch_one(&db.0)
@@ -749,7 +821,7 @@ async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<Payout
             UNION
             SELECT heeler_id AS roper_id FROM team WHERE event_id = ?1 AND status = 'active'
         )
-        "#
+        "#,
     )
     .bind(event_id)
     .fetch_one(&db.0)
@@ -847,7 +919,7 @@ async fn save_run(db: State<'_, Db>, payload: SaveRun) -> Result<i64, String> {
     // Si es NT o DQ, sacar al equipo de las rondas siguientes (status='skipped')
     if payload.no_time || payload.dq {
         sqlx::query(
-            "UPDATE run SET status = 'skipped' WHERE event_id = ?1 AND team_id = ?2 AND round > ?3"
+            "UPDATE run SET status = 'skipped' WHERE event_id = ?1 AND team_id = ?2 AND round > ?3",
         )
         .bind(payload.event_id)
         .bind(payload.team_id)
@@ -869,7 +941,17 @@ async fn save_run(db: State<'_, Db>, payload: SaveRun) -> Result<i64, String> {
     }
 
     let run_id = res.last_insert_rowid();
-    log_audit(&db.0, "save_run", "run", Some(run_id), Some(format!("Event {} Round {}", payload.event_id, payload.round))).await?;
+    log_audit(
+        &db.0,
+        "save_run",
+        "run",
+        Some(run_id),
+        Some(format!(
+            "Event {} Round {}",
+            payload.event_id, payload.round
+        )),
+    )
+    .await?;
     Ok(run_id)
 }
 
@@ -1031,7 +1113,14 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
                 last_row = last_id,
                 "create_team: success"
             );
-            log_audit(&db.0, "create_team", "team", Some(last_id), Some(format!("Event {}", t.event_id))).await?;
+            log_audit(
+                &db.0,
+                "create_team",
+                "team",
+                Some(last_id),
+                Some(format!("Event {}", t.event_id)),
+            )
+            .await?;
             Ok(last_id)
         }
         Err(e) => {
@@ -1063,7 +1152,14 @@ async fn hard_delete_teams_for_event(db: State<'_, Db>, event_id: i64) -> Result
                 event_id,
                 "hard_delete_teams_for_event: completed"
             );
-            log_audit(&db.0, "hard_delete_teams", "team", None, Some(format!("Event {}", event_id))).await?;
+            log_audit(
+                &db.0,
+                "hard_delete_teams",
+                "team",
+                None,
+                Some(format!("Event {}", event_id)),
+            )
+            .await?;
             Ok(())
         }
         Err(e) => {
@@ -1075,6 +1171,7 @@ async fn hard_delete_teams_for_event(db: State<'_, Db>, event_id: i64) -> Result
 
 #[tauri::command]
 async fn list_all_events_raw(db: State<'_, Db>) -> Result<Vec<EventRow>, String> {
+    db.require_license()?;
     tracing::info!("list_all_events_raw: returning all events without is_deleted filter");
     sqlx::query_as::<_, EventRow>(
         r#"
@@ -1100,7 +1197,11 @@ async fn list_all_events_raw(db: State<'_, Db>) -> Result<Vec<EventRow>, String>
 }
 
 #[tauri::command]
-async fn get_series_logs(db: State<'_, Db>, series_id: i64, limit: i64) -> Result<Vec<AuditLogItem>, String> {
+async fn get_series_logs(
+    db: State<'_, Db>,
+    series_id: i64,
+    limit: i64,
+) -> Result<Vec<AuditLogItem>, String> {
     sqlx::query_as::<_, AuditLogItem>(
         r#"
         SELECT id, action, entity_type, entity_id, user_id, metadata, created_at
@@ -1109,7 +1210,7 @@ async fn get_series_logs(db: State<'_, Db>, series_id: i64, limit: i64) -> Resul
            OR (entity_type = 'event' AND entity_id IN (SELECT id FROM event WHERE series_id = ?1))
         ORDER BY created_at DESC
         LIMIT ?2
-        "#
+        "#,
     )
     .bind(series_id)
     .bind(limit)
@@ -1171,7 +1272,14 @@ async fn create_roper(db: State<'_, Db>, r: NewRoper) -> Result<i64, String> {
     .map_err(|e| e.to_string())?;
 
     let id = res.last_insert_rowid();
-    log_audit(&db.0, "create_roper", "roper", Some(id), Some(format!("{} {}", r.first_name, r.last_name))).await?;
+    log_audit(
+        &db.0,
+        "create_roper",
+        "roper",
+        Some(id),
+        Some(format!("{} {}", r.first_name, r.last_name)),
+    )
+    .await?;
     Ok(id)
 }
 
@@ -1241,7 +1349,7 @@ async fn update_roper(db: State<'_, Db>, r: UpdateRoper) -> Result<(), String> {
         .execute(&db.0)
         .await
         .map_err(|e| e.to_string())?;
-    
+
     log_audit(&db.0, "update_roper", "roper", Some(r.id), None).await?;
     Ok(())
 }
@@ -1266,13 +1374,13 @@ async fn delete_roper(db: State<'_, Db>, id: i64) -> Result<(), String> {
 #[tauri::command]
 async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
     // Hard-delete: primero elimina todos los equipos, luego elimina todos los ropers
-    
+
     // Paso 1: Eliminar todos los equipos
     sqlx::query("DELETE FROM team")
         .execute(&db.0)
         .await
         .map_err(|e| format!("Error eliminando equipos: {}", e.to_string()))?;
-    
+
     // Paso 2: Eliminar todos los ropers
     let res = sqlx::query("DELETE FROM roper")
         .execute(&db.0)
@@ -1280,8 +1388,15 @@ async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
         .map_err(|e| format!("Error eliminando ropers: {}", e.to_string()))?;
 
     let count = res.rows_affected() as i64;
-    
-    log_audit(&db.0, "delete_all_ropers", "roper", None, Some(format!("Deleted {} ropers and all teams", count))).await?;
+
+    log_audit(
+        &db.0,
+        "delete_all_ropers",
+        "roper",
+        None,
+        Some(format!("Deleted {} ropers and all teams", count)),
+    )
+    .await?;
     Ok(count)
 }
 
@@ -1362,6 +1477,7 @@ async fn delete_team(db: State<'_, Db>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_series(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    db.require_license()?;
     // verificar que la serie exista
     let exists: Option<i64> =
         sqlx::query_scalar("SELECT id FROM series WHERE id = ?1 AND is_deleted = 0")
@@ -1534,7 +1650,7 @@ struct GenerateDrawOptions {
 async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i64, String> {
     // 1) Relaxed check: Only block if event is fully finalized/completed, OR if THIS specific round is started.
     // We do NOT use ensure_event_unlocked because that blocks 'locked'/'active' events which are exactly where we want to generate next rounds.
-    
+
     let event_status: Option<String> = sqlx::query_scalar("SELECT status FROM event WHERE id = ?1")
         .bind(opts.event_id)
         .fetch_optional(&db.0)
@@ -1544,7 +1660,9 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
 
     if let Some(s) = event_status {
         if s == "completed" || s == "finalized" || s == "archived" {
-            return Err("El evento está finalizado o archivado. No se pueden modificar rondas.".into());
+            return Err(
+                "El evento está finalizado o archivado. No se pueden modificar rondas.".into(),
+            );
         }
     }
 
@@ -1559,7 +1677,10 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
     .map_err(|e| e.to_string())?;
 
     if round_started {
-        return Err(format!("La ronda {} ya ha comenzado (tiene tiempos capturados). No se puede regenerar.", opts.round));
+        return Err(format!(
+            "La ronda {} ya ha comenzado (tiene tiempos capturados). No se puede regenerar.",
+            opts.round
+        ));
     }
 
     // Get the total number of rounds for this event to check if this is the final round
@@ -1609,7 +1730,7 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
                       AND status = 'completed'
                       AND no_time = 0
                       AND dq = 0
-                    "#
+                    "#,
                 )
                 .bind(opts.event_id)
                 .bind(team_id)
@@ -1617,7 +1738,7 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
                 .fetch_one(&db.0)
                 .await
                 .map_err(|e| e.to_string())?;
-                
+
                 result.push((team_id, total));
             }
             result
@@ -1625,22 +1746,25 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
 
         // Sort by accumulated time: highest first (DESC), teams without times go last
         teams = {
-            let mut teams_with_times: Vec<_> = team_times.iter()
+            let mut teams_with_times: Vec<_> = team_times
+                .iter()
                 .filter(|(_, time)| time.is_some())
                 .map(|(id, time)| (*id, time.unwrap()))
                 .collect();
-            
+
             // Sort by time descending (highest first)
-            teams_with_times.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            
+            teams_with_times
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
             let mut result: Vec<i64> = teams_with_times.iter().map(|(id, _)| *id).collect();
-            
+
             // Add teams without times at the end
-            let teams_without_times: Vec<i64> = team_times.iter()
+            let teams_without_times: Vec<i64> = team_times
+                .iter()
                 .filter(|(_, time)| time.is_none())
                 .map(|(id, _)| *id)
                 .collect();
-            
+
             result.extend(teams_without_times);
             result
         };
@@ -1651,8 +1775,6 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
             teams.shuffle(&mut thread_rng());
         }
     }
-
-
 
     let seed_runs = opts.seed_runs.unwrap_or(true);
 
@@ -1711,7 +1833,14 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    log_audit(&db.0, "generate_draw", "draw", None, Some(format!("Event {} Round {}", opts.event_id, opts.round))).await?;
+    log_audit(
+        &db.0,
+        "generate_draw",
+        "draw",
+        None,
+        Some(format!("Event {} Round {}", opts.event_id, opts.round)),
+    )
+    .await?;
     Ok(teams.len() as i64)
 }
 
@@ -1755,8 +1884,12 @@ async fn generate_draw_batch(
     // For each round EXCEPT THE LAST ONE
     // The last round should be generated separately after all intermediate rounds are completed
     // so that ropers can be sorted by accumulated time (highest to lowest)
-    let rounds_to_generate = if opts.rounds > 1 { opts.rounds - 1 } else { opts.rounds };
-    
+    let rounds_to_generate = if opts.rounds > 1 {
+        opts.rounds - 1
+    } else {
+        opts.rounds
+    };
+
     for r in 1..=rounds_to_generate {
         // Shuffle if requested (with smart spacing logic)
         if opts.shuffle {
@@ -1766,39 +1899,44 @@ async fn generate_draw_batch(
             // 2. Smart sort to avoid consecutive ropers with improved spacing
             let mut ordered: Vec<(i64, i64, i64)> = Vec::with_capacity(teams.len());
             let mut pool = teams.clone();
-            
+
             while !pool.is_empty() {
                 let mut best_idx = 0;
                 let mut best_score = -1;
-                
+
                 // Scan all candidates in pool
                 for (i, candidate) in pool.iter().enumerate() {
                     let mut min_distance = 999; // Large number
-                    
+
                     // Check backwards in 'ordered' to find minimum distance to any conflict
                     // We now check ALL previous entries, not just last 10
                     for (distance, prev) in ordered.iter().rev().enumerate() {
-                         let dist = distance + 1;
-                         // Check if any roper matches
-                         if prev.1 == candidate.1 || prev.1 == candidate.2 || 
-                            prev.2 == candidate.1 || prev.2 == candidate.2 {
-                             min_distance = dist;
-                             break; // Found closest conflict
-                         }
+                        let dist = distance + 1;
+                        // Check if any roper matches
+                        if prev.1 == candidate.1
+                            || prev.1 == candidate.2
+                            || prev.2 == candidate.1
+                            || prev.2 == candidate.2
+                        {
+                            min_distance = dist;
+                            break; // Found closest conflict
+                        }
                     }
-                    
+
                     // Score is the minimum distance to any conflict
                     // Higher is better. If no conflict found, min_distance stays at 999
                     let score = min_distance as i64;
-                    
+
                     if score > best_score {
                         best_score = score;
                         best_idx = i;
                         // If we found a candidate with no conflict in recent history (>20 positions), take it
-                        if score > 20 { break; } 
+                        if score > 20 {
+                            break;
+                        }
                     }
                 }
-                
+
                 ordered.push(pool.remove(best_idx));
             }
             teams = ordered;
@@ -1847,7 +1985,17 @@ async fn generate_draw_batch(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    log_audit(&db.0, "generate_draw_batch", "draw", None, Some(format!("Event {} Rounds 1-{} (Final round {} to be generated separately)", opts.event_id, rounds_to_generate, opts.rounds))).await?;
+    log_audit(
+        &db.0,
+        "generate_draw_batch",
+        "draw",
+        None,
+        Some(format!(
+            "Event {} Rounds 1-{} (Final round {} to be generated separately)",
+            opts.event_id, rounds_to_generate, opts.rounds
+        )),
+    )
+    .await?;
     Ok(teams.len() as i64 * rounds_to_generate)
 }
 
@@ -2024,7 +2172,11 @@ struct AuditLogItem {
 }
 
 #[tauri::command]
-async fn get_recent_activity(db: State<'_, Db>, limit: i64, offset: Option<i64>) -> Result<Vec<AuditLogItem>, String> {
+async fn get_recent_activity(
+    db: State<'_, Db>,
+    limit: i64,
+    offset: Option<i64>,
+) -> Result<Vec<AuditLogItem>, String> {
     let off = offset.unwrap_or(0);
     sqlx::query_as::<_, AuditLogItem>(
         r#"
@@ -2032,7 +2184,7 @@ async fn get_recent_activity(db: State<'_, Db>, limit: i64, offset: Option<i64>)
         FROM audit_log
         ORDER BY created_at DESC
         LIMIT ?1 OFFSET ?2
-        "#
+        "#,
     )
     .bind(limit)
     .bind(off)
@@ -2061,28 +2213,48 @@ async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String
     let pool = &db.0;
 
     let total_series: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE is_deleted = 0")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
-    
-    let active_series: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE is_deleted = 0 AND status = 'active'")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let active_series: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM series WHERE is_deleted = 0 AND status = 'active'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let active_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'active'")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let active_events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'active'")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let completed_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND (status = 'completed' OR status = 'locked')")
         .fetch_one(pool).await.map_err(|e| e.to_string())?;
 
-    let upcoming_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'upcoming'")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let upcoming_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'upcoming'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
-    let locked_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'locked'")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let locked_events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE is_deleted = 0 AND status = 'locked'")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let total_teams: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM team WHERE status = 'active'")
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Calculate Total Pot: Sum of (entry_fee * unique_ropers) + prize_pool for all active/completed events
     let pot_opt: Option<f64> = sqlx::query_scalar(
@@ -2104,7 +2276,7 @@ async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
-    
+
     let total_pot = pot_opt.unwrap_or(0.0);
 
     // Upcoming events in next 30 days
@@ -2114,7 +2286,7 @@ async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String
         WHERE is_deleted = 0 
           AND date >= date('now', 'localtime') 
           AND date <= date('now', '+30 days', 'localtime')
-        "#
+        "#,
     )
     .fetch_one(pool)
     .await
@@ -2164,7 +2336,11 @@ struct ExportOptions {
 }
 
 #[tauri::command]
-async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: ExportOptions) -> Result<(), String> {
+async fn export_event_to_excel(
+    db: State<'_, Db>,
+    event_id: i64,
+    options: ExportOptions,
+) -> Result<(), String> {
     let mut workbook = Workbook::new();
 
     // 1. Overview
@@ -2182,32 +2358,58 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
                 0.0 as pot
             FROM event 
             WHERE id = ?1
-            "#
+            "#,
         )
-            .bind(event_id)
-            .fetch_one(&db.0)
-            .await
+        .bind(event_id)
+        .fetch_one(&db.0)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        worksheet
+            .write_string(0, 0, "Event Name")
             .map_err(|e| e.to_string())?;
-        
-        worksheet.write_string(0, 0, "Event Name").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 1, &event.name).map_err(|e| e.to_string())?;
-        worksheet.write_string(1, 0, "Date").map_err(|e| e.to_string())?;
-        worksheet.write_string(1, 1, &event.date).map_err(|e| e.to_string())?;
-        worksheet.write_string(2, 0, "Status").map_err(|e| e.to_string())?;
-        worksheet.write_string(2, 1, event.status.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
-        worksheet.write_string(3, 0, "Location").map_err(|e| e.to_string())?;
-        worksheet.write_string(3, 1, event.location.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 1, &event.name)
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(1, 0, "Date")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(1, 1, &event.date)
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(2, 0, "Status")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(2, 1, event.status.as_deref().unwrap_or(""))
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(3, 0, "Location")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(3, 1, event.location.as_deref().unwrap_or(""))
+            .map_err(|e| e.to_string())?;
     }
 
     // 2. Teams
     if options.teams {
         let worksheet = workbook.add_worksheet();
         worksheet.set_name("Teams").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 0, "ID").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 1, "Header").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 2, "Heeler").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 3, "Rating").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 4, "Status").map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 0, "ID")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 1, "Header")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 2, "Heeler")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 3, "Rating")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 4, "Status")
+            .map_err(|e| e.to_string())?;
 
         let teams_expanded: Vec<(i64, String, String, f64, String)> = sqlx::query_as(
             r#"
@@ -2220,7 +2422,7 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
             JOIN roper rhe ON t.heeler_id = rhe.id
             WHERE t.event_id = ?1
             ORDER BY t.id
-            "#
+            "#,
         )
         .bind(event_id)
         .fetch_all(&db.0)
@@ -2229,11 +2431,21 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
 
         for (i, (id, header, heeler, rating, status)) in teams_expanded.iter().enumerate() {
             let row = (i + 1) as u32;
-            worksheet.write_number(row, 0, *id as f64).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 1, header).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 2, heeler).map_err(|e| e.to_string())?;
-            worksheet.write_number(row, 3, *rating).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 4, status).map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 0, *id as f64)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 1, header)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 2, heeler)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 3, *rating)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 4, status)
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -2242,25 +2454,61 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
         let worksheet = workbook.add_worksheet();
         worksheet.set_name("Run Order").map_err(|e| e.to_string())?;
         let runs = get_runs_expanded(db.clone(), event_id, None).await?;
-        worksheet.write_string(0, 0, "Round").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 1, "Position").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 2, "Header").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 3, "Heeler").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 4, "Time").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 5, "Penalty").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 6, "Total").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 7, "Status").map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 0, "Round")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 1, "Position")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 2, "Header")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 3, "Heeler")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 4, "Time")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 5, "Penalty")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 6, "Total")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 7, "Status")
+            .map_err(|e| e.to_string())?;
 
         for (i, run) in runs.iter().enumerate() {
             let row = (i + 1) as u32;
-            worksheet.write_number(row, 0, run.round as f64).map_err(|e| e.to_string())?;
-            worksheet.write_number(row, 1, run.position as f64).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 2, &run.header_name).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 3, &run.heeler_name).map_err(|e| e.to_string())?;
-            if let Some(t) = run.time_sec { worksheet.write_number(row, 4, t).map_err(|e| e.to_string())?; }
-            worksheet.write_number(row, 5, run.penalty).map_err(|e| e.to_string())?;
-            if let Some(t) = run.total_sec { worksheet.write_number(row, 6, t).map_err(|e| e.to_string())?; }
-            worksheet.write_string(row, 7, &run.status).map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 0, run.round as f64)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 1, run.position as f64)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 2, &run.header_name)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 3, &run.heeler_name)
+                .map_err(|e| e.to_string())?;
+            if let Some(t) = run.time_sec {
+                worksheet
+                    .write_number(row, 4, t)
+                    .map_err(|e| e.to_string())?;
+            }
+            worksheet
+                .write_number(row, 5, run.penalty)
+                .map_err(|e| e.to_string())?;
+            if let Some(t) = run.total_sec {
+                worksheet
+                    .write_number(row, 6, t)
+                    .map_err(|e| e.to_string())?;
+            }
+            worksheet
+                .write_string(row, 7, &run.status)
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -2269,21 +2517,49 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
         let worksheet = workbook.add_worksheet();
         worksheet.set_name("Standings").map_err(|e| e.to_string())?;
         let standings = get_standings(db.clone(), event_id).await?;
-        worksheet.write_string(0, 0, "Rank").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 1, "Header").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 2, "Heeler").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 3, "Total Time").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 4, "Caught").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 5, "Avg Time").map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 0, "Rank")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 1, "Header")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 2, "Heeler")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 3, "Total Time")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 4, "Caught")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 5, "Avg Time")
+            .map_err(|e| e.to_string())?;
 
         for (i, s) in standings.iter().enumerate() {
             let row = (i + 1) as u32;
-            worksheet.write_number(row, 0, s.rank as f64).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 1, &s.header_name).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 2, &s.heeler_name).map_err(|e| e.to_string())?;
-            if let Some(t) = s.total_time { worksheet.write_number(row, 3, t).map_err(|e| e.to_string())?; }
-            worksheet.write_number(row, 4, s.completed_runs as f64).map_err(|e| e.to_string())?;
-            if let Some(t) = s.avg_time { worksheet.write_number(row, 5, t).map_err(|e| e.to_string())?; }
+            worksheet
+                .write_number(row, 0, s.rank as f64)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 1, &s.header_name)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 2, &s.heeler_name)
+                .map_err(|e| e.to_string())?;
+            if let Some(t) = s.total_time {
+                worksheet
+                    .write_number(row, 3, t)
+                    .map_err(|e| e.to_string())?;
+            }
+            worksheet
+                .write_number(row, 4, s.completed_runs as f64)
+                .map_err(|e| e.to_string())?;
+            if let Some(t) = s.avg_time {
+                worksheet
+                    .write_number(row, 5, t)
+                    .map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -2292,36 +2568,74 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
         let worksheet = workbook.add_worksheet();
         worksheet.set_name("Payoffs").map_err(|e| e.to_string())?;
         let breakdown = get_payout_breakdown(db.clone(), event_id).await?;
-        
-        worksheet.write_string(0, 0, "Total Pot").map_err(|e| e.to_string())?;
-        worksheet.write_number(0, 1, breakdown.total_pot).map_err(|e| e.to_string())?;
-        worksheet.write_string(1, 0, "Deductions").map_err(|e| e.to_string())?;
-        worksheet.write_number(1, 1, breakdown.deductions).map_err(|e| e.to_string())?;
-        worksheet.write_string(2, 0, "Net Pot").map_err(|e| e.to_string())?;
-        worksheet.write_number(2, 1, breakdown.net_pot).map_err(|e| e.to_string())?;
 
-        worksheet.write_string(4, 0, "Place").map_err(|e| e.to_string())?;
-        worksheet.write_string(4, 1, "Percentage").map_err(|e| e.to_string())?;
-        worksheet.write_string(4, 2, "Amount").map_err(|e| e.to_string())?;
-        worksheet.write_string(4, 3, "Per Person").map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 0, "Total Pot")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_number(0, 1, breakdown.total_pot)
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(1, 0, "Deductions")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_number(1, 1, breakdown.deductions)
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(2, 0, "Net Pot")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_number(2, 1, breakdown.net_pot)
+            .map_err(|e| e.to_string())?;
+
+        worksheet
+            .write_string(4, 0, "Place")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(4, 1, "Percentage")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(4, 2, "Amount")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(4, 3, "Per Person")
+            .map_err(|e| e.to_string())?;
 
         for (i, p) in breakdown.payouts.iter().enumerate() {
             let row = (i + 5) as u32;
-            worksheet.write_number(row, 0, p.place as f64).map_err(|e| e.to_string())?;
-            worksheet.write_number(row, 1, p.percentage).map_err(|e| e.to_string())?;
-            worksheet.write_number(row, 2, p.amount).map_err(|e| e.to_string())?;
-            worksheet.write_number(row, 3, p.amount / 2.0).map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 0, p.place as f64)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 1, p.percentage)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 2, p.amount)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_number(row, 3, p.amount / 2.0)
+                .map_err(|e| e.to_string())?;
         }
     }
 
     // 6. Event Logs
     if options.event_logs {
         let worksheet = workbook.add_worksheet();
-        worksheet.set_name("Event Logs").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 0, "Date").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 1, "Action").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 2, "User").map_err(|e| e.to_string())?;
-        worksheet.write_string(0, 3, "Details").map_err(|e| e.to_string())?;
+        worksheet
+            .set_name("Event Logs")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 0, "Date")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 1, "Action")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 2, "User")
+            .map_err(|e| e.to_string())?;
+        worksheet
+            .write_string(0, 3, "Details")
+            .map_err(|e| e.to_string())?;
 
         let logs: Vec<(String, String, Option<i64>, Option<String>)> = sqlx::query_as(
             r#"
@@ -2329,7 +2643,7 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
             FROM audit_log
             WHERE entity_type = 'event' AND entity_id = ?1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(event_id)
         .fetch_all(&db.0)
@@ -2338,15 +2652,32 @@ async fn export_event_to_excel(db: State<'_, Db>, event_id: i64, options: Export
 
         for (i, (date, action, user_id, metadata)) in logs.iter().enumerate() {
             let row = (i + 1) as u32;
-            worksheet.write_string(row, 0, date).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 1, action).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 2, &user_id.map(|u| u.to_string()).unwrap_or_default()).map_err(|e| e.to_string())?;
-            worksheet.write_string(row, 3, metadata.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 0, date)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 1, action)
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 2, &user_id.map(|u| u.to_string()).unwrap_or_default())
+                .map_err(|e| e.to_string())?;
+            worksheet
+                .write_string(row, 3, metadata.as_deref().unwrap_or(""))
+                .map_err(|e| e.to_string())?;
         }
     }
 
-    workbook.save(&options.file_path).map_err(|e| e.to_string())?;
-    log_audit(&db.0, "export_event", "event", Some(event_id), Some("Exported to Excel".into())).await?;
+    workbook
+        .save(&options.file_path)
+        .map_err(|e| e.to_string())?;
+    log_audit(
+        &db.0,
+        "export_event",
+        "event",
+        Some(event_id),
+        Some("Exported to Excel".into()),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2361,16 +2692,19 @@ struct SerialPortInfo {
 #[tauri::command]
 async fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     let ports = PolarisTimerCapture::list_ports().map_err(|e| e.to_string())?;
-    
-    Ok(ports.into_iter().map(|p| SerialPortInfo {
-        port_name: p.port_name.clone(),
-        port_type: match p.port_type {
-            serialport::SerialPortType::UsbPort(_) => "USB".to_string(),
-            serialport::SerialPortType::BluetoothPort => "Bluetooth".to_string(),
-            serialport::SerialPortType::PciPort => "PCI".to_string(),
-            serialport::SerialPortType::Unknown => "Unknown".to_string(),
-        },
-    }).collect())
+
+    Ok(ports
+        .into_iter()
+        .map(|p| SerialPortInfo {
+            port_name: p.port_name.clone(),
+            port_type: match p.port_type {
+                serialport::SerialPortType::UsbPort(_) => "USB".to_string(),
+                serialport::SerialPortType::BluetoothPort => "Bluetooth".to_string(),
+                serialport::SerialPortType::PciPort => "PCI".to_string(),
+                serialport::SerialPortType::Unknown => "Unknown".to_string(),
+            },
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -2396,21 +2730,25 @@ async fn is_timer_connected() -> Result<bool, String> {
 #[tauri::command]
 async fn start_timer_capture(app_handle: tauri::AppHandle) -> Result<(), String> {
     let timer = TIMER_CAPTURE.lock().unwrap();
-    
+
     // Start capture (gets receiver)
     let mut rx = timer.start_capture().map_err(|e| e.to_string())?;
     drop(timer); // Release lock
-    
+
     // Spawn task to forward events to frontend
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             // Emit event to frontend
             let _ = app_handle.emit("timer-event", &event);
-            tracing::info!("Timer event: {} sec ({})", event.time_seconds, event.raw_text.trim());
+            tracing::info!(
+                "Timer event: {} sec ({})",
+                event.time_seconds,
+                event.raw_text.trim()
+            );
         }
         tracing::info!("Timer capture ended");
     });
-    
+
     Ok(())
 }
 
@@ -2435,6 +2773,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
+            let license_state = license::LicenseState::default();
             let db_path = resolve_db_path(&handle)?;
             // Asegura el directorio padre por si acaso (aunque resolve_db_path crea la carpeta)
             if let Some(parent) = db_path.parent() {
@@ -2459,7 +2798,9 @@ pub fn run() {
                     .await?;
 
                 sqlx::migrate!("./migrations").run(&pool).await?;
-                app.manage(Db(pool));
+                license::bootstrap(&handle, &pool, &license_state).await?;
+                app.manage(Db(pool.clone(), license_state.clone()));
+                app.manage(license_state);
                 Ok::<(), anyhow::Error>(())
             })?;
 
@@ -2516,7 +2857,13 @@ pub fn run() {
             connect_timer,
             disconnect_timer,
             is_timer_connected,
-            start_timer_capture
+            start_timer_capture,
+            // licensing
+            license::commands::get_device_hash,
+            license::commands::generate_license_request,
+            license::commands::install_license,
+            license::commands::license_status,
+            license::commands::remove_license
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri");

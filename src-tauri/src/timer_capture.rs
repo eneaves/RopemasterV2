@@ -100,7 +100,7 @@ impl PolarisTimerCapture {
                     Ok(_) => {
                         // Remover CR/LF
                         let trimmed = line.trim();
-                        
+
                         // Ignorar líneas vacías
                         if trimmed.is_empty() {
                             continue;
@@ -129,20 +129,17 @@ impl PolarisTimerCapture {
 }
 
 /// Parsea una línea del timer buscando tiempos válidos
-/// 
+///
 /// Formatos soportados:
 /// - 103.474
 /// - 103.47
 /// - 1:43.474
 /// - 1:43.47
-/// 
+///
 /// Los tiempos están precedidos por 2 caracteres de control (double-high/wide)
 fn parse_timer_line(line: &str) -> Option<TimerEvent> {
     // Remover caracteres de control (bytes < 32 excepto espacio)
-    let cleaned: String = line
-        .chars()
-        .filter(|c| *c >= ' ' || *c == '\t')
-        .collect();
+    let cleaned: String = line.chars().filter(|c| *c >= ' ' || *c == '\t').collect();
 
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {

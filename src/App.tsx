@@ -11,6 +11,8 @@ import { CaptureManagement } from './components/CaptureManagement'
 import { ActivityLogView } from './components/ActivityLogView'
 import { Toaster } from './components/ui/sonner'
 import { useState } from 'react'
+import { LicenseGate } from './components/LicenseGate'
+import { useLicense } from './providers/LicenseProvider'
 
 /**
  * Roping Manager — Aplicación principal
@@ -31,6 +33,7 @@ import { useState } from 'react'
  */
 export default function App() {
   const [activeMenuItem, setActiveMenuItem] = useState('dashboard')
+  const { isActive } = useLicense()
 
   // Maneja la navegación entre vistas principales
   const handleMenuItemClick = (item: string) => {
@@ -65,15 +68,19 @@ export default function App() {
     }
   }
 
+  if (!isActive) {
+    return (
+      <>
+        <LicenseGate />
+        <Toaster richColors position="top-right" />
+      </>
+    )
+  }
+
   return (
     <div className="h-screen w-screen flex bg-background text-foreground">
-      {/* Sidebar de navegación principal */}
       <Sidebar activeItem={activeMenuItem} onItemClick={handleMenuItemClick} />
-
-  {/* Contenido principal: cada vista administra su propio scroll para centro y panel derecho */}
-  <main className="flex-1 min-h-0">{renderContent()}</main>
-
-      {/* Sistema de notificaciones toast */}
+      <main className="flex-1 min-h-0">{renderContent()}</main>
       <Toaster richColors position="top-right" />
     </div>
   )

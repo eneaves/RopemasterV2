@@ -1,32 +1,48 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Switch } from './ui/switch'
 import { toast } from 'sonner'
+import { LicensePanel } from './LicensePanel'
+import { useLicense } from '../providers/LicenseProvider'
 
 const tabs = [
   'Perfil de usuario',
   'Datos y almacenamiento',
-  'Apariencia',
-  'Notificaciones',
-  'Idioma y región',
   'Sistema / Avanzado',
+  'Licencia',
 ]
 
 export function SettingsManagement() {
   const [active, setActive] = useState(tabs[0])
-  const [name, setName] = useState('Emiliano García')
-  const [email, setEmail] = useState('emiliano@ropingmanager.com')
-  const [role] = useState('Administrador')
   const [clearTempOnClose, setClearTempOnClose] = useState(false)
+  const { status: licenseSummary, loading: loadingLicense, refresh } = useLicense()
 
-  // Appearance state
-  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('light')
-  const [primaryColor, setPrimaryColor] = useState('#F97316') // Orange-500 hex
+  const badge = useMemo(() => {
+    if (!licenseSummary) {
+      return { label: 'Sin licencia', className: 'bg-slate-100 text-slate-600' }
+    }
+    switch (licenseSummary.status) {
+      case 'active':
+        return { label: 'Activa', className: 'bg-green-50 text-green-700' }
+      case 'expired':
+        return { label: 'Expirada', className: 'bg-red-50 text-red-700' }
+      case 'not_yet_valid':
+        return { label: 'Pendiente', className: 'bg-yellow-50 text-yellow-700' }
+      case 'invalid_device':
+        return { label: 'Otro dispositivo', className: 'bg-orange-50 text-orange-700' }
+      default:
+        return { label: 'Sin licencia', className: 'bg-slate-100 text-slate-600' }
+    }
+  }, [licenseSummary])
 
-  const handleSaveAppearance = () => {
-    // Here we would persist the theme settings
-    toast.success('Configuración de apariencia guardada')
+  const formatDate = (value?: number | null) => {
+    if (!value) return '—'
+    return new Date(value * 1000).toLocaleDateString('es-MX', {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    })
   }
 
   return (
@@ -53,42 +69,39 @@ export function SettingsManagement() {
           <section className="flex-1">
             {active === 'Perfil de usuario' && (
               <div>
-                <h2 className="text-lg font-medium">Perfil de Usuario</h2>
-                <p className="text-sm text-muted-foreground">Administra tu información personal</p>
+                <h2 className="text-lg font-medium">Resumen de Licencia</h2>
+                <p className="text-sm text-muted-foreground">Información rápida de tu activación actual.</p>
 
-                <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-20 h-20 rounded-full bg-orange-400 flex items-center justify-center text-white font-bold">EG</div>
+                <div className="mt-6 border border-border rounded-xl p-5 bg-card shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <div className="font-medium">{name}</div>
-                      <div className="text-sm text-muted-foreground">{email}</div>
-                      <div className="mt-2 text-xs text-orange-700 font-medium bg-orange-50 inline-block px-2 py-1 rounded-md">Administrador</div>
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Estado</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {licenseSummary ? badge.label : loadingLicense ? 'Cargando...' : 'Sin licencia'}
+                      </p>
                     </div>
+                    <span className={`px-3 py-1 rounded-full text-sm font-medium ${badge.className}`}>
+                      {badge.label}
+                    </span>
                   </div>
 
-                  <div className="space-y-3">
-                    <div>
-                      <label className="text-sm text-muted-foreground">Nombre completo</label>
-                      <Input value={name} onChange={(e) => setName(e.target.value)} />
-                    </div>
-
-                    <div>
-                      <label className="text-sm text-muted-foreground">Correo electrónico</label>
-                      <Input value={email} onChange={(e) => setEmail(e.target.value)} />
-                    </div>
-
-                    <div>
-                      <label className="text-sm text-muted-foreground">Rol</label>
-                      <select className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm" value={role} onChange={() => {}}>
-                        <option>Administrador</option>
-                      </select>
-                    </div>
+                  <div className="mt-6 grid gap-4 md:grid-cols-2">
+                    <InfoTile label="Titular" value={licenseSummary?.customer_name ?? '—'} />
+                    <InfoTile label="Plan" value={licenseSummary?.plan ?? '—'} />
+                    <InfoTile label="Vigencia" value={formatDate(licenseSummary?.not_before)} />
+                    <InfoTile label="Expira" value={formatDate(licenseSummary?.not_after)} />
+                    <InfoTile label="License ID" value={licenseSummary?.license_id ?? '—'} mono />
+                    <InfoTile label="Device hash" value={licenseSummary?.device_hash_hex ?? '—'} mono />
                   </div>
-                </div>
 
-                <div className="mt-6 flex items-center gap-3">
-                  <Button className="bg-orange-500 hover:bg-orange-600 text-white">Guardar cambios</Button>
-                  <Button variant="outline">Cerrar sesión</Button>
+                  <div className="mt-6 flex flex-wrap gap-3">
+                    <Button onClick={() => refresh().catch((err) => toast.error(err.message || 'No se pudo actualizar'))} variant="outline" disabled={loadingLicense}>
+                      {loadingLicense ? 'Actualizando...' : 'Actualizar'}
+                    </Button>
+                    <Button variant="secondary" onClick={() => setActive('Licencia')}>
+                      Abrir panel de licencias
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
@@ -125,95 +138,12 @@ export function SettingsManagement() {
               </div>
             )}
 
-            {active === 'Apariencia' && (
+            {active === 'Licencia' && (
               <div>
-                <h2 className="text-lg font-medium">Apariencia</h2>
-                <p className="text-sm text-muted-foreground">Personaliza el aspecto visual de la aplicación</p>
-
-                <div className="mt-6 grid grid-cols-1 gap-4">
-                  <div className="flex gap-3">
-                    <button 
-                      onClick={() => setTheme('light')}
-                      className={`p-4 rounded-md border w-1/3 text-center transition-all ${theme === 'light' ? 'border-orange-500 ring-2 ring-orange-200' : 'border-border bg-white'}`}
-                    >
-                      <div className="font-medium text-slate-900">Tema Claro</div>
-                    </button>
-                    <button 
-                      onClick={() => setTheme('dark')}
-                      className={`p-4 rounded-md border w-1/3 text-center transition-all ${theme === 'dark' ? 'border-orange-500 ring-2 ring-orange-200' : 'border-border bg-slate-900 text-white'}`}
-                    >
-                      <div className="font-medium">Tema Oscuro</div>
-                    </button>
-                    <button 
-                      onClick={() => setTheme('system')}
-                      className={`p-4 rounded-md border w-1/3 text-center transition-all ${theme === 'system' ? 'border-orange-500 ring-2 ring-orange-200' : 'border-border bg-gradient-to-r from-white to-slate-900'}`}
-                    >
-                      <div className={`font-medium ${theme === 'system' ? 'text-orange-700' : 'text-slate-500'}`}>Automático</div>
-                    </button>
-                  </div>
-
-                  <div>
-                    <div className="text-sm text-muted-foreground">Color primario</div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <div className="w-8 h-8 rounded-md border border-border" style={{ backgroundColor: primaryColor }} />
-                      <Input value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} className="w-32" />
-                      <Button variant="outline" onClick={() => setPrimaryColor('#F97316')}>Predeterminado</Button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4">
-                    <Button className="bg-orange-500 hover:bg-orange-600 text-white" onClick={handleSaveAppearance}>
-                      Aplicar Cambios
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {active === 'Notificaciones' && (
-              <div>
-                <h2 className="text-lg font-medium">Notificaciones</h2>
-                <p className="text-sm text-muted-foreground">Configura cómo recibes notificaciones</p>
-
-                <div className="mt-6 space-y-4">
-                  <div className="flex items-center justify-between bg-muted/50 p-3 rounded-md">
-                    <div>
-                      <div className="font-medium">Mostrar notificaciones emergentes</div>
-                      <div className="text-xs text-muted-foreground">Toasts en la esquina de la pantalla</div>
-                    </div>
-                    <Switch checked={true} onCheckedChange={() => {}} />
-                  </div>
-
-                  <div className="flex items-center justify-between bg-muted/50 p-3 rounded-md">
-                    <div>
-                      <div className="font-medium">Reproducir sonido al guardar o exportar</div>
-                      <div className="text-xs text-muted-foreground">Retroalimentación auditiva</div>
-                    </div>
-                    <Switch checked={true} onCheckedChange={() => {}} />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {active === 'Idioma y región' && (
-              <div>
-                <h2 className="text-lg font-medium">Idioma y Región</h2>
-                <p className="text-sm text-muted-foreground">Configura el idioma y formato regional</p>
-
-                <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-muted-foreground">Idioma de la interfaz</label>
-                    <select className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm">
-                      <option>Español</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-sm text-muted-foreground">Formato de fecha</label>
-                    <select className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm">
-                      <option>DD/MM/YYYY</option>
-                    </select>
-                  </div>
+                <h2 className="text-lg font-medium">Licencia</h2>
+                <p className="text-sm text-muted-foreground">Gestiona la licencia de Roping Manager.</p>
+                <div className="mt-6">
+                  <LicensePanel />
                 </div>
               </div>
             )}
@@ -238,6 +168,25 @@ export function SettingsManagement() {
             )}
           </section>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function InfoTile({
+  label,
+  value,
+  mono,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className={`text-sm mt-1 ${mono ? 'font-mono break-all' : 'font-medium text-foreground'}`}>
+        {value || '—'}
       </div>
     </div>
   )

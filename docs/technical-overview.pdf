@@ -1,0 +1,500 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 5 /Kids [5 0 R 7 0 R 9 0 R 11 0 R 13 0 R] >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 3439 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+72 720 Td
+(# Roping Manager – Technical Overview) Tj
+T*
+(_Last updated: 18 February 2026_) Tj
+T*
+( ) Tj
+T*
+(## 1. Purpose & Scope) Tj
+T*
+(This document captures the current functionality, technology stack, and backend interfaces of the ) Tj
+T*
+(Roping Manager desktop app so that engineers, operators, and integrators can reason about every ) Tj
+T*
+(feature offered today. It consolidates the React/Tauri frontend, the Rust/SQLite backend, and ) Tj
+T*
+(supporting tooling into a single technical reference for onboarding and audit purposes.) Tj
+T*
+( ) Tj
+T*
+(## 2. Technology Stack) Tj
+T*
+(| Layer | Key Technologies | Evidence |) Tj
+T*
+(| --- | --- | --- |) Tj
+T*
+(| Desktop container | Tauri 2 with `tauri-plugin-dialog` & `tauri-plugin-opener`; Rust 2021 edition ) Tj
+T*
+(| `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/Cargo.toml:1-47` |) Tj
+T*
+(| Frontend | React 19, TypeScript 5.8, Vite 7, TailwindCSS 3.4, Radix UI primitives, Lucide icons, ) Tj
+T*
+(`react-big-calendar`, `recharts`, Storybook 9 | `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/package.json:6-70` |) Tj
+T*
+(| Data & IPC | SQLite \(via `sqlx`\), Tokio async runtime, `@tauri-apps/api` invocations, ) Tj
+T*
+(`rust_xlsxwriter` for Excel exports | `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/Cargo.toml:20-44`, `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/lib/api.ts:1-235` |) Tj
+T*
+(| Tooling & QA | npm scripts for dev/build/storybook, Tauri CLI, Vitest + Playwright, Chromatic | ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/package.json:6-70` |) Tj
+T*
+( ) Tj
+T*
+(## 3. Architecture Overview) Tj
+T*
+(- **App shell & navigation.** `App` holds a `Sidebar`-driven state machine that swaps view-level ) Tj
+T*
+(components inside a flex layout, while Sonner toasts stay mounted globally. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/App.tsx:1-79` couples navigation IDs ) Tj
+T*
+(with view components, and `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/Sidebar.tsx:18-83` renders the accessible nav rail.) Tj
+T*
+(- **IPC boundary.** All data mutations and reads flow through thin wrappers in ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/lib/api.ts:1-235`, which map camelCase) Tj
+T*
+( props into the snake_case payloads Rust expects.) Tj
+T*
+(- **Backend runtime.** `run\(\)` in `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/src/lib.rs:2353-2443` boots SQLite, applies migrations, registers every `#[tauri::command]`, ) Tj
+T*
+(and exposes Excel export utilities backed by `rust_xlsxwriter`.) Tj
+T*
+(- **State helpers.** Hooks such as `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/hooks/useTeams.ts:1-89` and `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/hooks/useRopers.ts:1-159` normalize backend rows and enforce lock-state validation before ) Tj
+T*
+(writing.) Tj
+T*
+( ) Tj
+T*
+(## 4. Functional Coverage \(Frontend\)) Tj
+T*
+(### 4.1 Dashboard & Navigation) Tj
+T*
+(- **Series-centric overview.** `Dashboard` orchestrates the entire workflow: it loads series, stats,) Tj
+T*
+( and activity logs, coordinates modal CRUD operations, and conditionally renders `EventsView` or ) Tj
+T*
+(`EventDetails` panes. `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 3978 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+72 720 Td
+(tauri/src/components/Dashboard.tsx:64-200` covers state, fetching, and CRUD handlers.) Tj
+T*
+(- **Metrics sidebar.** `MetricsPanel` summarizes counts \(series, events, teams, pot, progress\) using) Tj
+T*
+( cards and progress bars fed by `get_dashboard_stats`, see ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/MetricsPanel.tsx:1-94`.) Tj
+T*
+(- **Recent activity widget.** `RecentActivity` renders audit log snippets with action-based ) Tj
+T*
+(iconography to keep dashboard users situationally aware. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/RecentActivity.tsx:1-77`.) Tj
+T*
+( ) Tj
+T*
+(### 4.2 Event Lifecycle Workspace) Tj
+T*
+(- **Series event browser.** `EventsView` combines search, status filters, card/table toggles, and ) Tj
+T*
+(modals for new/edit/delete actions while enforcing admin PIN gates. It loads only events that belong) Tj
+T*
+( to the selected series and wires duplication, export, draw, capture, standings, and payoff actions.) Tj
+T*
+( `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/EventsView.tsx:23-200`.) Tj
+T*
+(- **Series insights.** `SeriesOverviewCard` and `InsightsPanel` give aggregated counts, pot ) Tj
+T*
+(projections, and activity feed for the open series, helping producers prioritize. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/SeriesOverviewCard.tsx:1-60`, `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/InsightsPanel.tsx:1-120`.) Tj
+T*
+(- **Event workspace layout.** `EventDetails` presents breadcrumb navigation, an `EventMetricsCard`, ) Tj
+T*
+(and tabbed tooling for teams, draw, capture, standings, payoffs, and exports. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/EventDetails.tsx:1-160`.) Tj
+T*
+(  - **Teams Tab.** Dragnet for roster health, filtering, sorting, and creation flows \(manual or ) Tj
+T*
+(auto-balanced pairing\) while honoring rating caps and lock status. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/TeamsTab.tsx:1-210` ) Tj
+T*
+(integrates `useTeams`/`useRopers` plus hard-delete + rebuild routines.) Tj
+T*
+(  - **Draw Tab.** Generates entire rounds or individual rounds with shuffling, reseeding, and ) Tj
+T*
+(validation checks via `generate_draw` and `generate_draw_batch`. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/DrawTab.tsx:1-150`.) Tj
+T*
+(  - **Capture Tab.** `CaptureRunsTab` embeds a chronometer, keyboard shortcuts, manual override ) Tj
+T*
+(mode, PIN-protected overwrites, and auto-locking of events after the first saved run ) Tj
+T*
+(\(`update_event_status`\). `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/CaptureRunsTab.tsx:59-520`.) Tj
+T*
+(  - **Standings Tab.** Real-time aggregation with filters, podium cards, and Excel export hook ) Tj
+T*
+(\(`export_event_to_excel`\). `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/StandingsTab.tsx:1-200`.) Tj
+T*
+(  - **Payoffs Tab.** Preset-driven prize allocation, CRUD over payoff rules, and payout ) Tj
+T*
+(visualization backed by `list_payoff_rules` and `get_payout_breakdown`. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/PayoffsTab.tsx:1-200`.) Tj
+T*
+(  - **Export Tab.** Sheet selection UI that pipes user choices into the backend exporter via Tauri’s) Tj
+T*
+( dialog plugin. `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/ExportTab.tsx:1-180`.) Tj
+T*
+( ) Tj
+T*
+(### 4.3 Cross-Series Operational Views) Tj
+T*
+(- **Global calendar.** `EventsCalendar` renders every event on `react-big-calendar`, color-codes ) Tj
+T*
+(statuses, and offers inline creation via `NewEventModal`. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/EventsCalendar.tsx:1-180`.) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 3673 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+72 720 Td
+(- **Teams Management \(multi-event\).** Enables organizers to switch series/event filters, auto-create) Tj
+T*
+( balanced rosters, and hard-reset teams when needed. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/TeamsManagement.tsx:39-200`.) Tj
+T*
+(- **Ropers Management.** Full CRUD, CSV/XLSX import, and bulk deletion of ropers using the `xlsx` ) Tj
+T*
+(library and the `useRopers` hook. `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/RopersManagement.tsx:22-200`.) Tj
+T*
+(- **Capture Management.** Guides operators through selecting series/events, summarises readiness ) Tj
+T*
+(KPIs, and launches the focused `EventCaptureView`. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/CaptureManagement.tsx:1-140`.) Tj
+T*
+(- **Event Capture fullscreen.** Provides the same capture workflow outside tabs, with keyboard ) Tj
+T*
+(shortcuts, timer controls, and direct Excel export. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/EventCaptureView.tsx:1-200`.) Tj
+T*
+(- **Results & Analytics.** `ResultsManagement` and `PayoffsManagement` expose cross-event filters, ) Tj
+T*
+(payout summaries, and export buttons so staff can audit outcomes even after events close. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/ResultsManagement.tsx:1-200`, `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/PayoffsManagement.tsx:1-200`.) Tj
+T*
+(- **Export Center.** `ExportManagement` wraps recurring export settings, include/exclude toggles, ) Tj
+T*
+(and a mock history table for operational traceability. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src/components/ExportManagement.tsx:1-200`.) Tj
+T*
+(- **Activity Log.** Infinite-scroll audit viewer with tone-coded actions and `get_recent_activity` ) Tj
+T*
+(pagination. `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/ActivityLogView.tsx:1-124`.) Tj
+T*
+(- **Settings.** Multi-tab preference surface for user profile, storage, backups, appearance, ) Tj
+T*
+(notifications, and locale toggles. `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src/components/SettingsManagement.tsx:1-200`.) Tj
+T*
+( ) Tj
+T*
+(## 5. Backend Command Surface) Tj
+T*
+(The Tauri backend exposes every functional area through dedicated commands registered in ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/src/lib.rs:2394-2443`. Detailed ) Tj
+T*
+(behaviors mirror the Spanish documentation in `/Users/emilianoneaves/Documents/RMT/roping-manager-) Tj
+T*
+(tauri/src-tauri/BACKEND_DOCUMENTATION.md:93-260`.) Tj
+T*
+( ) Tj
+T*
+(| Domain | Commands & Highlights |) Tj
+T*
+(| --- | --- |) Tj
+T*
+(| Health | `health_check` for DB readiness. |) Tj
+T*
+(| Series | `list_series`, `create_series`, `update_series`, `delete_series` \(with cascade ) Tj
+T*
+(safeguards\). |) Tj
+T*
+(| Events | `list_events`, `list_all_events_raw`, `create_event`, `update_event`, ) Tj
+T*
+(`update_event_status`, `duplicate_event`, `delete_event`, `lock_event`. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:128-158` |) Tj
+T*
+(| Teams | `list_teams`, `create_team`, `update_team`, `delete_team`, `hard_delete_teams_for_event` ) Tj
+T*
+(enforce uniqueness and lock rules. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:172-190` |) Tj
+T*
+(| Ropers | `list_ropers`, `create_roper`, `update_roper`, `delete_roper`, `delete_all_ropers`. ) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+10 0 obj
+<< /Length 3377 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+72 720 Td
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:193-207` |) Tj
+T*
+(| Draw & Runs | `generate_draw`, `generate_draw_batch`, `get_draw`, `save_run`, `get_runs`, ) Tj
+T*
+(`get_runs_expanded` maintain run-order integrity before capture. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:160-220` |) Tj
+T*
+(| Standings & Analytics | `get_standings`, `get_dashboard_stats`, `get_series_logs`, ) Tj
+T*
+(`get_recent_activity`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:210-233` |) Tj
+T*
+(| Payoffs | `list_payoff_rules`, `create_payoff_rule`, `delete_payoff_rule`, `get_payout_breakdown` ) Tj
+T*
+(\(see struct implementations at `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/src/lib.rs:583-750`\). |) Tj
+T*
+(| Export | `export_event_to_excel` builds multi-sheet XLSX files \(overview, teams, run order, ) Tj
+T*
+(standings, payoffs, logs\) with `rust_xlsxwriter`. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/src-tauri/src/lib.rs:2150-2341` |) Tj
+T*
+( ) Tj
+T*
+(### IPC Reliability Considerations) Tj
+T*
+(- `log_audit` is invoked after every mutating command to populate `audit_log`, though frontend still) Tj
+T*
+( treats activity feed as informational because auth is not yet enforced.) Tj
+T*
+(- Commands rely on `ensure_event_unlocked` internally, so UI attempts will surface backend errors if) Tj
+T*
+( someone bypasses the locking UX.) Tj
+T*
+( ) Tj
+T*
+(## 6. Data Model Snapshot) Tj
+T*
+(Based on migrations summarized in `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:60-90`:) Tj
+T*
+(- **Core tables:** `series`, `event`, `team`, `roper`, `run`, `draw`, `payoff_rule`, `payoff`, ) Tj
+T*
+(`audit_log`.) Tj
+T*
+(- **Security scaffolding:** `app_user`, `role`, `user_role`, and `license_info` exist for future ) Tj
+T*
+(auth/licensing, yet no frontend flows consume them today.) Tj
+T*
+(- **Integrity rules:** Rounded counts, status enums, and triggers ensure rating caps and permissible) Tj
+T*
+( values \(`status`, `rounds`, `level`\).) Tj
+T*
+( ) Tj
+T*
+(## 7. Frontend–Backend Integration Patterns) Tj
+T*
+(- **API wrappers.** `@tauri-apps/api`’s `invoke` is centralized so payload quirks \(snake_case IDs, ) Tj
+T*
+(status normalization\) are patched once instead of per view. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/lib/api.ts:21-175`.) Tj
+T*
+(- **State hooks.** `useTeams` and `useRopers` debounce refetches, normalize mixed-case column names,) Tj
+T*
+( and block writes when events are locked, ensuring UI logic mirrors backend constraints. ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/hooks/useTeams.ts:4-88`, ) Tj
+T*
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/hooks/useRopers.ts:18-159`.) Tj
+T*
+(- **File operations.** Excel imports/exports leverage the shared `xlsx` npm package on the frontend ) Tj
+T*
+(\(`RopersManagement`\) and `rust_xlsxwriter` on the backend for reports, giving parity between desk ) Tj
+T*
+(and operator workflows.) Tj
+T*
+( ) Tj
+T*
+(## 8. Build, Test, and Ops) Tj
+T*
+(- **Local dev.** `npm run dev` starts Vite, and `npm run tauri dev` spawns the desktop shell. ) Tj
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 10 0 R >>
+endobj
+12 0 obj
+<< /Length 1636 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+72 720 Td
+(`/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/package.json:6-13`.) Tj
+T*
+(- **Quality gates.** Storybook \(`npm run storybook`\), Vitest + Playwright combos, and Chromatic ) Tj
+T*
+(snapshots are wired for component regression coverage. `/Users/emilianoneaves/Documents/RMT/roping-) Tj
+T*
+(manager-tauri/package.json:6-70`.) Tj
+T*
+(- **Database tooling.** `sqlx-cli` plus the `docs/dev_reset_db.md` playbook \(not modified here\) ) Tj
+T*
+(allow wiping or reseeding local SQLite instances when QA scenarios demand a clean slate.) Tj
+T*
+( ) Tj
+T*
+(## 9. Observations & Recommended Next Steps) Tj
+T*
+(Borrowing from the backend TODOs `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-) Tj
+T*
+(tauri/BACKEND_DOCUMENTATION.md:232-249` and current frontend gaps:) Tj
+T*
+(1. **Authentication & Authorization.** Implement Argon2-backed login flows and gate IPC commands per) Tj
+T*
+( `user_role` to protect the audit trail.) Tj
+T*
+(2. **Audit completeness.** Frontend mutations should await confirmation that `log_audit` succeeded ) Tj
+T*
+(\(or retry\) so Activity Log remains exhaustive.) Tj
+T*
+(3. **Integration tests.** Add Rust integration specs for `create_team`, `generate_draw`, `save_run`,) Tj
+T*
+( and `get_standings`, plus Vitest suites for hooks.) Tj
+T*
+(4. **Type sharing.** Generate a shared TypeScript schema \(e.g., via `ts-rs`\) so frontend payload ) Tj
+T*
+(types stay in sync with backend structs.) Tj
+T*
+(5. **Licensing hooks.** If device licensing is required, wire `license_info` validations into app ) Tj
+T*
+(startup and expose user feedback in Settings.) Tj
+T*
+( ) Tj
+ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 12 0 R >>
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000141 00000 n 
+0000000211 00000 n 
+0000003702 00000 n 
+0000003828 00000 n 
+0000007858 00000 n 
+0000007984 00000 n 
+0000011709 00000 n 
+0000011835 00000 n 
+0000015265 00000 n 
+0000015393 00000 n 
+0000017082 00000 n 
+trailer << /Size 14 /Root 1 0 R >>
+startxref
+17210
+%%EOF

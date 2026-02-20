@@ -1,4 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  LicenseInputPayload,
+  LicensePlan,
+  LicenseRequestSummaryDto,
+  LicenseStatusDto,
+} from '../types/license';
 
 // Series
 export const getSeries = () => invoke<any[]>('list_series');
@@ -197,6 +203,28 @@ export const deleteAllRopers = () =>
 // Payoffs
 export const listPayoffRules = (eventId?: number) =>
   invoke<any[]>('list_payoff_rules', { eventId });
+
+// Licensing
+export const getDeviceHash = () => invoke<string>('get_device_hash');
+
+export const generateLicenseRequest = (
+  plan: LicensePlan,
+  customerNameHint?: string,
+  destinationPath?: string,
+) =>
+  invoke<LicenseRequestSummaryDto>('generate_license_request', {
+    plan,
+    customerNameHint,
+    destinationPath,
+  });
+
+export const installLicense = (input: LicenseInputPayload) =>
+  invoke<LicenseStatusDto>('install_license', { input });
+
+export const getLicenseStatus = () =>
+  invoke<LicenseStatusDto | null>('license_status');
+
+export const removeLicense = () => invoke<void>('remove_license');
 
 export const createPayoffRule = (rule: {
   event_id: number;

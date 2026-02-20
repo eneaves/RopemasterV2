@@ -1,0 +1,15 @@
+[package]
+name = "license_core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Roping Manager"]
+description = "License parsing and verification core shared with Roping Manager"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ed25519-dalek = "1"
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"
+thiserror = "1"
+hex = "0.4"
+rand = "0.8"
