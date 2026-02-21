@@ -66,6 +66,15 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
     }
   }, [events])
 
+  const formatTimestamp = (value?: string | null) => {
+    if (!value) return 'Fecha desconocida'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) {
+      return value
+    }
+    return date.toLocaleString()
+  }
+
   const activities: ActivityItem[] = logs.length > 0 ? logs.slice(0, 10).map(log => {
     let icon = <Info className="size-4" />
     let color = 'text-foreground/80 bg-muted'
@@ -81,10 +90,12 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
         color = 'text-red-600 bg-red-50'
     }
 
+    const timestamp = formatTimestamp(log.timestamp ?? log.created_at)
+
     return {
         id: String(log.id),
-        message: log.details,
-        timestamp: new Date(log.timestamp).toLocaleString(),
+        message: log.details ?? log.action,
+        timestamp,
         icon,
         color
     }

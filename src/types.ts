@@ -90,7 +90,8 @@ export interface SeriesLog {
   eventId?: number | null
   action: string
   details: string
-  timestamp: string
+  timestamp?: string
+  created_at?: string
 }
 
 export interface DashboardStats {
