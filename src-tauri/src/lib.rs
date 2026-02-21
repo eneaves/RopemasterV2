@@ -79,9 +79,7 @@ async fn log_audit(
 
 /* ------------------- HEALTH ------------------- */
 #[tauri::command]
-async fn health_check(
-    db: State<'_, Db>,
-) -> Result<String, String> {
+async fn health_check(db: State<'_, Db>) -> Result<String, String> {
     db.require_license()?;
     sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&db.0)
@@ -185,11 +183,7 @@ struct UpdateSeries {
 }
 
 #[tauri::command]
-async fn update_series(
-    db: State<'_, Db>,
-    id: i64,
-    patch: UpdateSeries,
-) -> Result<(), String> {
+async fn update_series(db: State<'_, Db>, id: i64, patch: UpdateSeries) -> Result<(), String> {
     db.require_license()?;
     // verify series exists
     let exists: Option<i64> =
@@ -380,9 +374,9 @@ async fn create_event(db: State<'_, Db>, payload: NewEvent) -> Result<i64, Strin
     .bind(&status)
     .bind(payload.rounds)
     .bind(&payload.location)
-    .bind(&payload.entry_fee)
-    .bind(&payload.prize_pool)
-    .bind(&payload.max_team_rating)
+    .bind(payload.entry_fee)
+    .bind(payload.prize_pool)
+    .bind(payload.max_team_rating)
     .bind(&payload.payoff_allocation)
     .bind(&payload.admin_pin)
     .execute(&db.0)
@@ -437,11 +431,7 @@ struct EventPatch {
 }
 
 #[tauri::command]
-async fn update_event(
-    db: State<'_, Db>,
-    id: i64,
-    patch: EventPatch,
-) -> Result<(), String> {
+async fn update_event(db: State<'_, Db>, id: i64, patch: EventPatch) -> Result<(), String> {
     db.require_license()?;
     let pool = &db.0;
 
@@ -532,10 +522,7 @@ async fn update_event(
 }
 
 #[tauri::command]
-async fn delete_event(
-    db: State<'_, Db>,
-    id: i64,
-) -> Result<(), String> {
+async fn delete_event(db: State<'_, Db>, id: i64) -> Result<(), String> {
     db.require_license()?;
     let pool = &db.0;
     // Verificar existencia y estado
@@ -570,10 +557,7 @@ async fn delete_event(
 }
 
 #[tauri::command]
-async fn duplicate_event(
-    db: State<'_, Db>,
-    id: i64,
-) -> Result<i64, String> {
+async fn duplicate_event(db: State<'_, Db>, id: i64) -> Result<i64, String> {
     db.require_license()?;
     let pool = &db.0;
 
@@ -636,10 +620,7 @@ async fn duplicate_event(
 }
 
 #[tauri::command]
-async fn lock_event(
-    db: State<'_, Db>,
-    event_id: i64,
-) -> Result<(), String> {
+async fn lock_event(db: State<'_, Db>, event_id: i64) -> Result<(), String> {
     db.require_license()?;
     sqlx::query(
         "UPDATE event SET status = 'locked', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1"
@@ -792,6 +773,7 @@ struct PayoutAllocation {
 
 #[tauri::command]
 async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<PayoutBreakdown, String> {
+    db.require_license()?;
     // 1. Get Event Details (Entry Fee, Prize Pool)
     // IMPORTANT: We need to satisfy EventRow struct which expects teams_count and pot.
     // We select 0 for them here because we calculate them manually below.
@@ -881,6 +863,35 @@ struct SaveRun {
 
 #[tauri::command]
 async fn save_run(db: State<'_, Db>, payload: SaveRun) -> Result<i64, String> {
+    db.require_license()?;
+
+    // Validate that the team belongs to the provided event and is active
+    let team_event_id: Option<i64> =
+        sqlx::query_scalar("SELECT event_id FROM team WHERE id = ?1 AND status = 'active'")
+            .bind(payload.team_id)
+            .fetch_optional(&db.0)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let Some(team_event_id) = team_event_id else {
+        return Err("Equipo no encontrado o inactivo.".into());
+    };
+
+    if team_event_id != payload.event_id {
+        return Err("El equipo no pertenece al evento indicado.".into());
+    }
+
+    // Ensure the target event still exists (not deleted)
+    let event_exists: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM event WHERE id = ?1 AND is_deleted = 0")
+            .bind(payload.event_id)
+            .fetch_optional(&db.0)
+            .await
+            .map_err(|e| e.to_string())?;
+    if event_exists.is_none() {
+        return Err("Evento no encontrado o inactivo.".into());
+    }
+
     let total = if payload.no_time || payload.dq {
         None
     } else {
@@ -1007,6 +1018,7 @@ struct TeamRow {
 
 #[tauri::command]
 async fn list_teams(db: State<'_, Db>, event_id: i64) -> Result<Vec<TeamRow>, String> {
+    db.require_license()?;
     tracing::info!(event_id, "list_teams: called");
 
     let rows = sqlx::query_as::<_, TeamRow>(
@@ -1048,6 +1060,7 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
         "create_team: attempt"
     );
 
+    db.require_license()?;
     ensure_event_unlocked(&db.0, t.event_id).await?;
 
     // Validación básica: header != heeler
@@ -1136,6 +1149,7 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
 
 #[tauri::command]
 async fn hard_delete_teams_for_event(db: State<'_, Db>, event_id: i64) -> Result<(), String> {
+    db.require_license()?;
     tracing::info!(event_id, "hard_delete_teams_for_event: starting");
     // verificar que el evento exista y no esté locked
     ensure_event_unlocked(&db.0, event_id).await?;
@@ -1202,6 +1216,7 @@ async fn get_series_logs(
     series_id: i64,
     limit: i64,
 ) -> Result<Vec<AuditLogItem>, String> {
+    db.require_license()?;
     sqlx::query_as::<_, AuditLogItem>(
         r#"
         SELECT id, action, entity_type, entity_id, user_id, metadata, created_at
@@ -1223,6 +1238,7 @@ async fn get_series_logs(
 
 #[tauri::command]
 async fn list_ropers(db: State<'_, Db>) -> Result<Vec<RoperRow>, String> {
+    db.require_license()?;
     // Solo retornamos ropers activos (is_active = 1) como parte de la política de soft-delete.
     sqlx::query_as::<_, RoperRow>(
         r#"
@@ -1239,6 +1255,7 @@ async fn list_ropers(db: State<'_, Db>) -> Result<Vec<RoperRow>, String> {
 
 #[tauri::command]
 async fn create_roper(db: State<'_, Db>, r: NewRoper) -> Result<i64, String> {
+    db.require_license()?;
     // Validar specialty
     if r.specialty != "header" && r.specialty != "heeler" && r.specialty != "both" {
         return Err("Specialty inválida: usa 'header', 'heeler' o 'both'.".into());
@@ -1285,6 +1302,7 @@ async fn create_roper(db: State<'_, Db>, r: NewRoper) -> Result<i64, String> {
 
 #[tauri::command]
 async fn update_roper(db: State<'_, Db>, r: UpdateRoper) -> Result<(), String> {
+    db.require_license()?;
     // verificar existencia
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM roper WHERE id = ?1")
         .bind(r.id)
@@ -1356,6 +1374,7 @@ async fn update_roper(db: State<'_, Db>, r: UpdateRoper) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_roper(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    db.require_license()?;
     // Política: soft-delete para ropers. Marcamos `is_active = 0`.
     let res = sqlx::query("UPDATE roper SET is_active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1")
         .bind(id)
@@ -1373,19 +1392,20 @@ async fn delete_roper(db: State<'_, Db>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
+    db.require_license()?;
     // Hard-delete: primero elimina todos los equipos, luego elimina todos los ropers
 
     // Paso 1: Eliminar todos los equipos
     sqlx::query("DELETE FROM team")
         .execute(&db.0)
         .await
-        .map_err(|e| format!("Error eliminando equipos: {}", e.to_string()))?;
+        .map_err(|e| format!("Error eliminando equipos: {e}"))?;
 
     // Paso 2: Eliminar todos los ropers
     let res = sqlx::query("DELETE FROM roper")
         .execute(&db.0)
         .await
-        .map_err(|e| format!("Error eliminando ropers: {}", e.to_string()))?;
+        .map_err(|e| format!("Error eliminando ropers: {e}"))?;
 
     let count = res.rows_affected() as i64;
 
@@ -1409,6 +1429,7 @@ struct UpdateTeam {
 
 #[tauri::command]
 async fn update_team(db: State<'_, Db>, t: UpdateTeam) -> Result<(), String> {
+    db.require_license()?;
     // Lee event_id del team para validar lock
     let event_id: Option<i64> = sqlx::query_scalar("SELECT event_id FROM team WHERE id = ?1")
         .bind(t.id)
@@ -1449,6 +1470,7 @@ async fn update_team(db: State<'_, Db>, t: UpdateTeam) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_team(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    db.require_license()?;
     // Obtén event_id y valida lock
     let event_id: Option<i64> = sqlx::query_scalar("SELECT event_id FROM team WHERE id = ?1")
         .bind(id)
@@ -1547,6 +1569,7 @@ async fn get_runs(
     event_id: i64,
     round: Option<i64>,
 ) -> Result<Vec<RunRow>, String> {
+    db.require_license()?;
     if let Some(r) = round {
         sqlx::query_as::<_, RunRow>(
             r#"
@@ -1602,6 +1625,7 @@ async fn get_runs_expanded(
     event_id: i64,
     round: Option<i64>,
 ) -> Result<Vec<RunExpandedRow>, String> {
+    db.require_license()?;
     let base_query = r#"
         SELECT
           r.id, r.event_id, r.team_id, r.round, r.position,
@@ -1648,6 +1672,7 @@ struct GenerateDrawOptions {
 
 #[tauri::command]
 async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i64, String> {
+    db.require_license()?;
     // 1) Relaxed check: Only block if event is fully finalized/completed, OR if THIS specific round is started.
     // We do NOT use ensure_event_unlocked because that blocks 'locked'/'active' events which are exactly where we want to generate next rounds.
 
@@ -1856,6 +1881,7 @@ async fn generate_draw_batch(
     db: State<'_, Db>,
     opts: GenerateBatchDrawOptions,
 ) -> Result<i64, String> {
+    db.require_license()?;
     ensure_event_unlocked(&db.0, opts.event_id).await?;
 
     // Get active teams with composition for smart shuffling (filtering eliminated)
@@ -2029,6 +2055,7 @@ struct StandingAgg {
 
 #[tauri::command]
 async fn get_standings(db: State<'_, Db>, event_id: i64) -> Result<Vec<StandingRow>, String> {
+    db.require_license()?;
     // Agregados por equipo para el evento
     let mut rows: Vec<StandingAgg> = sqlx::query_as::<_, StandingAgg>(
         r#"
@@ -2135,6 +2162,7 @@ struct DrawRow {
 
 #[tauri::command]
 async fn get_draw(db: State<'_, Db>, event_id: i64, round: i64) -> Result<Vec<DrawRow>, String> {
+    db.require_license()?;
     sqlx::query_as::<_, DrawRow>(
         r#"
         SELECT 
@@ -2177,6 +2205,7 @@ async fn get_recent_activity(
     limit: i64,
     offset: Option<i64>,
 ) -> Result<Vec<AuditLogItem>, String> {
+    db.require_license()?;
     let off = offset.unwrap_or(0);
     sqlx::query_as::<_, AuditLogItem>(
         r#"
@@ -2210,6 +2239,7 @@ struct DashboardStats {
 
 #[tauri::command]
 async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String> {
+    db.require_license()?;
     let pool = &db.0;
 
     let total_series: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE is_deleted = 0")
@@ -2341,6 +2371,7 @@ async fn export_event_to_excel(
     event_id: i64,
     options: ExportOptions,
 ) -> Result<(), String> {
+    db.require_license()?;
     let mut workbook = Workbook::new();
 
     // 1. Overview
@@ -2659,7 +2690,7 @@ async fn export_event_to_excel(
                 .write_string(row, 1, action)
                 .map_err(|e| e.to_string())?;
             worksheet
-                .write_string(row, 2, &user_id.map(|u| u.to_string()).unwrap_or_default())
+                .write_string(row, 2, user_id.map(|u| u.to_string()).unwrap_or_default())
                 .map_err(|e| e.to_string())?;
             worksheet
                 .write_string(row, 3, metadata.as_deref().unwrap_or(""))
@@ -2690,7 +2721,8 @@ struct SerialPortInfo {
 }
 
 #[tauri::command]
-async fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+async fn list_serial_ports(db: State<'_, Db>) -> Result<Vec<SerialPortInfo>, String> {
+    db.require_license()?;
     let ports = PolarisTimerCapture::list_ports().map_err(|e| e.to_string())?;
 
     Ok(ports
@@ -2708,27 +2740,34 @@ async fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 }
 
 #[tauri::command]
-async fn connect_timer(port_name: String) -> Result<(), String> {
+async fn connect_timer(db: State<'_, Db>, port_name: String) -> Result<(), String> {
+    db.require_license()?;
     let timer = TIMER_CAPTURE.lock().unwrap();
     timer.connect(&port_name).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-async fn disconnect_timer() -> Result<(), String> {
+async fn disconnect_timer(db: State<'_, Db>) -> Result<(), String> {
+    db.require_license()?;
     let timer = TIMER_CAPTURE.lock().unwrap();
     timer.disconnect();
     Ok(())
 }
 
 #[tauri::command]
-async fn is_timer_connected() -> Result<bool, String> {
+async fn is_timer_connected(db: State<'_, Db>) -> Result<bool, String> {
+    db.require_license()?;
     let timer = TIMER_CAPTURE.lock().unwrap();
     Ok(timer.is_connected())
 }
 
 #[tauri::command]
-async fn start_timer_capture(app_handle: tauri::AppHandle) -> Result<(), String> {
+async fn start_timer_capture(
+    db: State<'_, Db>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    db.require_license()?;
     let timer = TIMER_CAPTURE.lock().unwrap();
 
     // Start capture (gets receiver)
@@ -2774,7 +2813,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
             let license_state = license::LicenseState::default();
-            let db_path = resolve_db_path(&handle)?;
+            let db_path = resolve_db_path(handle)?;
             // Asegura el directorio padre por si acaso (aunque resolve_db_path crea la carpeta)
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -2798,7 +2837,7 @@ pub fn run() {
                     .await?;
 
                 sqlx::migrate!("./migrations").run(&pool).await?;
-                license::bootstrap(&handle, &pool, &license_state).await?;
+                license::bootstrap(handle, &pool, &license_state).await?;
                 app.manage(Db(pool.clone(), license_state.clone()));
                 app.manage(license_state);
                 Ok::<(), anyhow::Error>(())

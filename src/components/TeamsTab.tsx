@@ -249,6 +249,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
     try {
       await remove(Number(teamId))
       toast.success('Equipo eliminado')
+      onTeamsUpdated?.()
     } catch (e: any) {
       toast.error(String(e?.message ?? e))
     }
@@ -277,6 +278,8 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
       if (status === 'exceeds') {
         toast.warning(`Este equipo excede el rating máximo (${maxRating})`)
       }
+
+      onTeamsUpdated?.()
     } catch (e: any) {
       toast.error(String(e?.message ?? e))
     }

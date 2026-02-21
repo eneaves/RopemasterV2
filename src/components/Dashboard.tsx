@@ -11,6 +11,7 @@ import { NewSeriesModal } from './NewSeriesModal'
 import { toast } from 'sonner'
 import { useState, useEffect, useMemo, useDeferredValue } from 'react'
 import { getSeries, createSeries, updateSeries, deleteSeries, getDashboardStats, getRecentActivity, getEvents } from '@/lib/api'
+import { useAppNavigation } from '@/hooks/useAppNavigation'
 import type { Series, Event, DashboardStats, AuditLogItem } from '../types'
 
 const initialSeries: Series[] = [
@@ -56,12 +57,8 @@ const initialSeries: Series[] = [
   },
 ]
 
-
-interface DashboardProps {
-  onNavigate?: (item: string) => void
-}
-
-export function Dashboard({ onNavigate }: DashboardProps = {}) {
+export function Dashboard() {
+  const navigateTo = useAppNavigation()
   const [series, setSeries] = useState<Series[]>(initialSeries)
   const [selectedSeries, setSelectedSeries] = useState<Series | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null)
@@ -297,14 +294,11 @@ export function Dashboard({ onNavigate }: DashboardProps = {}) {
         series={selectedSeries}
         onBack={handleBackToSeries}
         onEditEvent={(ev) => handleViewEvent(ev)}
-        
         onExportEvent={() => toast.success('Evento exportado')}
-        // Por defecto estas acciones abren EventDetails (no la vista de captura).
         onGenerateDraw={(ev) => handleViewEvent(ev)}
         onRecordRuns={(ev) => handleViewEvent(ev)}
         onViewStandings={(ev) => handleViewEvent(ev)}
         onComputePayoffs={(ev) => handleViewEvent(ev)}
-        onNavigate={onNavigate}
       />
     )
   }
@@ -365,7 +359,7 @@ export function Dashboard({ onNavigate }: DashboardProps = {}) {
           </div>
 
           {/* Actividad reciente */}
-          <RecentActivity items={recentActivity} onViewAll={() => onNavigate?.('activity')} />
+          <RecentActivity items={recentActivity} onViewAll={() => navigateTo('activity')} />
         </div>
       </div>
 

@@ -12,55 +12,38 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { useTeams } from '@/hooks/useTeams'
 import { useRopers } from '@/hooks/useRopers'
-import { getEvents, getSeries } from '@/lib/api'
 import { RefreshCw } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Alert, AlertDescription, AlertTitle } from './ui/alert'
+import { useSeriesEvents } from '@/providers/SeriesEventsProvider'
 
 export function TeamsManagement() {
-  const [seriesList, setSeriesList] = useState<any[]>([])
-  const [eventsList, setEventsList] = useState<any[]>([])
-  
+  const { series: seriesList, events: eventsCatalog, loading: catalogLoading, refreshEvents, refreshSeries } = useSeriesEvents()
   const [selectedSeriesId, setSelectedSeriesId] = useState<string>('all')
   const [selectedEventId, setSelectedEventId] = useState<string>('')
 
-  // Load Series and Events
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const s = await getSeries()
-        setSeriesList(s || [])
-        const e = await getEvents()
-        setEventsList(e || [])
-        
-        // Default to first event if available and none selected
-        if (e && e.length > 0 && !selectedEventId) {
-            setSelectedEventId(String(e[0].id))
-        }
-      } catch (err) {
-        console.error('Failed to load series/events', err)
-      }
-    }
-    loadData()
-  }, [])
-
   // Filter events based on selected series
   const filteredEvents = useMemo(() => {
-    if (selectedSeriesId === 'all') return eventsList
-    return eventsList.filter(e => String(e.series_id) === selectedSeriesId)
-  }, [eventsList, selectedSeriesId])
+    if (selectedSeriesId === 'all') return eventsCatalog
+    return eventsCatalog.filter((event) => String(event.series_id ?? event.seriesId) === selectedSeriesId)
+  }, [eventsCatalog, selectedSeriesId])
 
   // Update selected event if it becomes invalid due to series filter
   useEffect(() => {
+    if (!selectedEventId && filteredEvents.length > 0) {
+      setSelectedEventId(String(filteredEvents[0].id))
+      return
+    }
+
     if (selectedEventId && filteredEvents.length > 0) {
-        const exists = filteredEvents.find(e => String(e.id) === selectedEventId)
-        if (!exists) {
-            setSelectedEventId(String(filteredEvents[0].id))
-        }
-    } else if (filteredEvents.length > 0 && !selectedEventId) {
+      const exists = filteredEvents.some((event) => String(event.id) === selectedEventId)
+      if (!exists) {
         setSelectedEventId(String(filteredEvents[0].id))
-    } else if (filteredEvents.length === 0) {
-        setSelectedEventId('')
+      }
+    }
+
+    if (filteredEvents.length === 0 && selectedEventId) {
+      setSelectedEventId('')
     }
   }, [filteredEvents, selectedEventId])
 
@@ -68,7 +51,7 @@ export function TeamsManagement() {
   const { teams, loading, err, refresh } = useTeams(eventIdNum, false)
   const { ropers } = useRopers()
 
-  const selectedEvent = eventsList.find(e => String(e.id) === selectedEventId)
+  const selectedEvent = filteredEvents.find(e => String(e.id) === selectedEventId)
   const maxRating = selectedEvent?.max_team_rating ?? 0
 
   const enrichedTeams = useMemo(() => {
@@ -97,8 +80,17 @@ export function TeamsManagement() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" onClick={() => refresh()} title="Recargar">
-                <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                refresh()
+                refreshEvents()
+                refreshSeries()
+              }}
+              title="Recargar"
+            >
+              <RefreshCw className={`size-4 ${(loading || catalogLoading) ? 'animate-spin' : ''}`} />
             </Button>
           </div>
         </div>
@@ -142,7 +134,7 @@ export function TeamsManagement() {
 
         {/* Debug Info (Temporary) */}
         <div className="text-xs text-muted-foreground mb-2">
-            Debug: EventID: {selectedEventId} | Teams: {teams.length} | Loading: {String(loading)}
+            Debug: EventID: {selectedEventId} | Teams: {teams.length} | Loading: {String(loading || catalogLoading)}
         </div>
 
         {/* Summary panel */}
@@ -164,43 +156,45 @@ export function TeamsManagement() {
 
         {/* Table */}
         <div className="bg-card border border-border rounded-xl p-4">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>ID</TableHead>
-                <TableHead>Header</TableHead>
-                <TableHead>Heeler</TableHead>
-                <TableHead>Rating Header</TableHead>
-                <TableHead>Rating Heeler</TableHead>
-                <TableHead>Team Rating</TableHead>
-                <TableHead>Estado</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {loading ? (
-                 <TableRow><TableCell colSpan={7} className="text-center">Cargando...</TableCell></TableRow>
-              ) : !selectedEventId ? (
-                 <TableRow><TableCell colSpan={7} className="text-center">Selecciona un evento para ver los equipos</TableCell></TableRow>
-              ) : enrichedTeams.length === 0 ? (
-                 <TableRow><TableCell colSpan={7} className="text-center">No hay equipos registrados</TableCell></TableRow>
-              ) : (
-                enrichedTeams.map((t) => (
-                <TableRow key={t.id}>
-                  <TableCell className="font-medium">{t.id}</TableCell>
-                  <TableCell>{t.headerName}</TableCell>
-                  <TableCell>{t.heelerName}</TableCell>
-                  <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-xs">{t.headerRating}</span></TableCell>
-                  <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-xs">{t.heelerRating}</span></TableCell>
-                  <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-sm">{t.rating}</span></TableCell>
-                  <TableCell>
-                    <Badge variant={t.status === 'active' || t.status === 'valid' ? 'default' : 'destructive'}>
-                        {t.status}
-                    </Badge>
-                  </TableCell>
+          <div className="max-h-[60vh] overflow-auto">
+            <Table className="min-w-full">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>ID</TableHead>
+                  <TableHead>Header</TableHead>
+                  <TableHead>Heeler</TableHead>
+                  <TableHead>Rating Header</TableHead>
+                  <TableHead>Rating Heeler</TableHead>
+                  <TableHead>Team Rating</TableHead>
+                  <TableHead>Estado</TableHead>
                 </TableRow>
-              )))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {loading ? (
+                   <TableRow><TableCell colSpan={7} className="text-center">Cargando...</TableCell></TableRow>
+                ) : !selectedEventId ? (
+                   <TableRow><TableCell colSpan={7} className="text-center">Selecciona un evento para ver los equipos</TableCell></TableRow>
+                ) : enrichedTeams.length === 0 ? (
+                   <TableRow><TableCell colSpan={7} className="text-center">No hay equipos registrados</TableCell></TableRow>
+                ) : (
+                  enrichedTeams.map((t) => (
+                  <TableRow key={t.id}>
+                    <TableCell className="font-medium">{t.id}</TableCell>
+                    <TableCell>{t.headerName}</TableCell>
+                    <TableCell>{t.heelerName}</TableCell>
+                    <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-xs">{t.headerRating}</span></TableCell>
+                    <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-xs">{t.heelerRating}</span></TableCell>
+                    <TableCell><span className="inline-flex items-center justify-center rounded-full bg-muted/20 px-2 py-1 text-sm">{t.rating}</span></TableCell>
+                    <TableCell>
+                      <Badge variant={t.status === 'active' || t.status === 'valid' ? 'default' : 'destructive'}>
+                          {t.status}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                )))}
+              </TableBody>
+            </Table>
+          </div>
         </div>
       </div>
 

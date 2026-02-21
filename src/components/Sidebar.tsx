@@ -8,27 +8,26 @@ import {
   Download,
   Settings,
 } from 'lucide-react'
+import { useAppNavigation, useActiveMenuKey } from '@/hooks/useAppNavigation'
 
-interface SidebarProps {
-  activeItem: string
-  onItemClick: (item: string) => void
-}
+const MENU_ITEMS = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'ropers', label: 'Ropers', icon: Trophy },
+  { id: 'eventos', label: 'Eventos', icon: Calendar },
+  { id: 'equipos', label: 'Equipos', icon: Users },
+  { id: 'resultados', label: 'Resultados', icon: BarChart3 },
+  { id: 'payoffs', label: 'Payoffs', icon: DollarSign },
+  { id: 'exportar', label: 'Exportar', icon: Download },
+  { id: 'settings', label: 'Settings', icon: Settings },
+] as const
 
-export function Sidebar({ activeItem, onItemClick }: SidebarProps) {
-  const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'ropers', label: 'Ropers', icon: Trophy },
-    { id: 'eventos', label: 'Eventos', icon: Calendar },
-    { id: 'equipos', label: 'Equipos', icon: Users },
-    { id: 'resultados', label: 'Resultados', icon: BarChart3 },
-    { id: 'payoffs', label: 'Payoffs', icon: DollarSign },
-    { id: 'exportar', label: 'Exportar', icon: Download },
-    { id: 'settings', label: 'Settings', icon: Settings },
-  ]
+export function Sidebar() {
+  const activeItem = useActiveMenuKey()
+  const navigateTo = useAppNavigation()
 
   return (
-    <aside role="navigation" aria-label="Primary" className="w-64 h-full bg-[var(--sidebar)] border-r border-[var(--sidebar-border)]">
-      <div className="p-6">
+    <aside role="navigation" aria-label="Primary" className="w-64 h-full bg-[var(--sidebar)] border-r border-[var(--sidebar-border)] flex flex-col overflow-hidden">
+      <div className="p-6 flex-1 overflow-y-auto">
         <div className="flex items-center gap-3 mb-10">
           <div className="size-10 rounded-xl flex items-center justify-center shadow-sm bg-[var(--sidebar-primary)]">
             <span className="text-[var(--sidebar-primary-foreground)] font-medium">RM</span>
@@ -44,7 +43,7 @@ export function Sidebar({ activeItem, onItemClick }: SidebarProps) {
             Administración
           </h3>
           <nav className="space-y-1">
-            {menuItems.map((item) => {
+            {MENU_ITEMS.map((item) => {
               const Icon = item.icon
               const isActive = activeItem === item.id
               return (
@@ -52,7 +51,7 @@ export function Sidebar({ activeItem, onItemClick }: SidebarProps) {
                   key={item.id}
                   type="button"
                   aria-current={isActive ? 'page' : undefined}
-                  onClick={() => onItemClick(item.id)}
+                  onClick={() => navigateTo(item.id)}
                   className={[
                     'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors',
                     isActive

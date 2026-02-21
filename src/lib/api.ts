@@ -24,7 +24,6 @@ export const listTeams = async (eventId: number) => {
     console.debug('[api] listTeams -> invoking list_teams', { eventId })
   } catch (e) {}
 
-  // FIX: backend expects 'event_id' (snake_case), not 'eventId'
   const res = await invoke<any[]>('list_teams', { eventId });
 
   try {
@@ -36,7 +35,6 @@ export const listTeams = async (eventId: number) => {
 }
 
 export const hardDeleteTeamsForEvent = (eventId: number) =>
-  // FIX: backend expects 'event_id'
   invoke<void>('hard_delete_teams_for_event', { eventId });
 
 export const createTeam = async (payload: {
@@ -112,7 +110,6 @@ export const getEvents = (seriesId?: number) => {
       // eslint-disable-next-line no-console
       console.debug('[api] getEvents -> list_events', { seriesId })
     } catch (e) {}
-    // FIX: backend expects 'series_id'
     return invoke<any[]>('list_events', { seriesId });
   }
   try {
@@ -201,8 +198,12 @@ export const deleteAllRopers = () =>
   invoke<number>('delete_all_ropers');
 
 // Payoffs
-export const listPayoffRules = (eventId?: number) =>
-  invoke<any[]>('list_payoff_rules', { eventId });
+export const listPayoffRules = (eventId?: number) => {
+  if (typeof eventId === 'number' && Number.isFinite(eventId)) {
+    return invoke<any[]>('list_payoff_rules', { eventId });
+  }
+  return invoke<any[]>('list_payoff_rules');
+};
 
 // Licensing
 export const getDeviceHash = () => invoke<string>('get_device_hash');
@@ -260,8 +261,8 @@ export const getRecentActivity = (limit: number, offset: number = 0) =>
 export const getDashboardStats = () =>
   invoke<any>('get_dashboard_stats');
 
-export const getSeriesLogs = (seriesId: number) =>
-  invoke<any[]>('get_series_logs', { seriesId });
+export const getSeriesLogs = (seriesId: number, limit = 50) =>
+  invoke<any[]>('get_series_logs', { seriesId, limit });
 
 // Timer Capture
 export interface SerialPortInfo {

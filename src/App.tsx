@@ -1,3 +1,4 @@
+import { Navigate, Outlet, Route, Routes, useNavigate } from 'react-router-dom'
 import { Sidebar } from './components/Sidebar'
 import { Dashboard } from './components/Dashboard'
 import { RopersManagement } from './components/RopersManagement'
@@ -10,63 +11,29 @@ import { SettingsManagement } from './components/SettingsManagement'
 import { CaptureManagement } from './components/CaptureManagement'
 import { ActivityLogView } from './components/ActivityLogView'
 import { Toaster } from './components/ui/sonner'
-import { useState } from 'react'
 import { LicenseGate } from './components/LicenseGate'
 import { useLicense } from './providers/LicenseProvider'
+import { SeriesEventsProvider } from './providers/SeriesEventsProvider'
 
-/**
- * Roping Manager — Aplicación principal
- *
- * Sistema de gestión de competencias de team roping con flujo completo:
- * Dashboard (Series) → Eventos → Workspace
- *
- * Navegación:
- * - dashboard: Vista principal
- * - eventos: Calendario de eventos
- * - equipos: Gestión de equipos
- * - ropers: Gestión de competidores
- * - captura: Captura de tiempos
- * - resultados: Visualización de resultados
- * - payoffs: Cálculo de premios
- * - exportar: Exportación de reportes
- * - settings: Configuración general
- */
+function ActivityLogPage() {
+  const navigate = useNavigate()
+  return <ActivityLogView onBack={() => navigate(-1)} />
+}
+
+function AppShell() {
+  return (
+    <div className="h-screen w-screen flex bg-background text-foreground">
+      <Sidebar />
+      <main className="flex-1 min-h-0 overflow-hidden">
+        <Outlet />
+      </main>
+      <Toaster richColors position="top-right" />
+    </div>
+  )
+}
+
 export default function App() {
-  const [activeMenuItem, setActiveMenuItem] = useState('dashboard')
   const { isActive } = useLicense()
-
-  // Maneja la navegación entre vistas principales
-  const handleMenuItemClick = (item: string) => {
-    setActiveMenuItem(item)
-  }
-
-  // Renderiza el contenido según la vista activa
-  const renderContent = () => {
-    switch (activeMenuItem) {
-      case 'dashboard':
-        return <Dashboard onNavigate={handleMenuItemClick} />
-      case 'eventos':
-        return <EventsCalendar />
-      case 'equipos':
-        return <TeamsManagement />
-      case 'ropers':
-        return <RopersManagement />
-      case 'captura':
-        return <CaptureManagement />
-      case 'resultados':
-        return <ResultsManagement />
-      case 'payoffs':
-        return <PayoffsManagement />
-      case 'exportar':
-        return <ExportManagement />
-      case 'settings':
-        return <SettingsManagement />
-      case 'activity':
-        return <ActivityLogView onBack={() => setActiveMenuItem('dashboard')} />
-      default:
-        return <Dashboard onNavigate={handleMenuItemClick} />
-    }
-  }
 
   if (!isActive) {
     return (
@@ -78,10 +45,22 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen flex bg-background text-foreground">
-      <Sidebar activeItem={activeMenuItem} onItemClick={handleMenuItemClick} />
-      <main className="flex-1 min-h-0">{renderContent()}</main>
-      <Toaster richColors position="top-right" />
-    </div>
+    <SeriesEventsProvider>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<Dashboard />} />
+          <Route path="/eventos" element={<EventsCalendar />} />
+          <Route path="/equipos" element={<TeamsManagement />} />
+          <Route path="/ropers" element={<RopersManagement />} />
+          <Route path="/captura" element={<CaptureManagement />} />
+          <Route path="/resultados" element={<ResultsManagement />} />
+          <Route path="/payoffs" element={<PayoffsManagement />} />
+          <Route path="/exportar" element={<ExportManagement />} />
+          <Route path="/settings" element={<SettingsManagement />} />
+          <Route path="/activity" element={<ActivityLogPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </SeriesEventsProvider>
   )
 }

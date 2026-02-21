@@ -169,7 +169,7 @@ pub async fn install_license(
     };
     state.replace(Some(cache.clone()));
 
-    Ok(build_status_dto(&cache, &device_hash, now)?)
+    build_status_dto(&cache, &device_hash, now)
 }
 
 #[tauri::command]

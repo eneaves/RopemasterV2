@@ -12,11 +12,14 @@ interface EventMetricsCardProps {
 }
 
 export function EventMetricsCard({ event }: EventMetricsCardProps) {
-  // Calcular proyección simple si no hay pot definido pero hay equipos y entry fee
-  // (Solo visual, no afecta lógica real)
-  const projectedPot = (event.pot === 0 && event.entryFee && event.teamsCount) 
-    ? event.entryFee * event.teamsCount 
-    : event.pot
+  const totalTeams = Number(event.teamsCount ?? event.teams_count ?? 0)
+  const entryFeePerRoper = Number(event.entryFee ?? event.entry_fee ?? 0) || null
+  const potValue = Number(event.pot ?? event.total_pot ?? 0)
+
+  const projectedPot =
+    potValue === 0 && entryFeePerRoper && totalTeams > 0
+      ? entryFeePerRoper * totalTeams * 2
+      : potValue
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
@@ -29,8 +32,7 @@ export function EventMetricsCard({ event }: EventMetricsCardProps) {
             </div>
         </div>
         <div>
-            <span className="text-3xl font-bold text-foreground tracking-tight">{event.teamsCount}</span>
-            {/* <span className="text-xs text-muted-foreground ml-2">+2 hoy</span> */}
+            <span className="text-3xl font-bold text-foreground tracking-tight">{totalTeams}</span>
         </div>
       </div>
 
@@ -64,9 +66,9 @@ export function EventMetricsCard({ event }: EventMetricsCardProps) {
         </div>
         <div>
             <span className="text-3xl font-bold text-foreground tracking-tight tabular-nums">
-                {formatCurrency(event.entryFee)}
+                {formatCurrency(entryFeePerRoper)}
             </span>
-            <span className="text-xs text-muted-foreground ml-1 font-medium">/ equipo</span>
+            <span className="text-xs text-muted-foreground ml-1 font-medium">/ roper</span>
         </div>
       </div>
 

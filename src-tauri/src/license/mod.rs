@@ -51,9 +51,12 @@ impl LicenseState {
 }
 
 pub fn ensure_active(state: &LicenseState) -> Result<LicenseCache, CommandError> {
-    let cache = state
-        .snapshot()
-        .ok_or_else(|| CommandError::new("LicenseRequired", "Instala una licencia válida para continuar."))?;
+    let cache = state.snapshot().ok_or_else(|| {
+        CommandError::new(
+            "LicenseRequired",
+            "Instala una licencia válida para continuar.",
+        )
+    })?;
 
     let payload = &cache.payload;
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -110,10 +113,7 @@ static LICENSE_PUBLIC_KEY: Lazy<RwLock<PublicKey>> = Lazy::new(|| {
 });
 
 pub fn public_key() -> PublicKey {
-    LICENSE_PUBLIC_KEY
-        .read()
-        .expect("public key lock poisoned")
-        .clone()
+    *LICENSE_PUBLIC_KEY.read().expect("public key lock poisoned")
 }
 
 pub async fn bootstrap(

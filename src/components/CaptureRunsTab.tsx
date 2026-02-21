@@ -914,17 +914,18 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-6 bg-muted/30 rounded-xl border border-border/50">
                   <div className="space-y-2">
                     <Label htmlFor="penalty" className="text-foreground font-medium">Penalización (s)</Label>
-                    <div className="relative">
+                    <div className="relative flex items-center">
                         <Input
-                        id="penalty"
-                        type="number"
-                        step="1"
-                        value={penalty}
-                        onChange={(e) => setPenalty(e.target.value)}
-                        placeholder="0"
-                        className="bg-background border-border h-12 text-lg font-mono ps-4"
+                          id="penalty"
+                          type="number"
+                          step="1"
+                          value={penalty}
+                          onChange={(e) => setPenalty(e.target.value)}
+                          placeholder="0"
+                          className="bg-background border-border h-12 text-lg font-mono text-center pr-12 appearance-none"
+                          style={{ MozAppearance: 'textfield' }}
                         />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">sec</span>
+                        <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-muted-foreground text-sm font-medium">sec</span>
                     </div>
                   </div>
                   

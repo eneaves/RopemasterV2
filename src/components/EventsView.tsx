@@ -10,6 +10,7 @@ import { InsightsPanel } from './InsightsPanel'
 import { NewEventModal } from './NewEventModal'
 import { toast } from 'sonner'
 import { getEvents, createEvent, duplicateEvent, deleteEvent, updateEvent } from '@/lib/api'
+import { useAppNavigation } from '@/hooks/useAppNavigation'
 import type { Series, Event } from '../types'
 import {
   Table,
@@ -31,7 +32,6 @@ interface EventsViewProps {
   onRecordRuns?: (e: Event) => void
   onViewStandings?: (e: Event) => void
   onComputePayoffs?: (e: Event) => void
-  onNavigate?: (item: string) => void
 }
 
 export function EventsView({
@@ -44,8 +44,8 @@ export function EventsView({
   onRecordRuns,
   onViewStandings,
   onComputePayoffs,
-  onNavigate,
 }: EventsViewProps) {
+  const navigateTo = useAppNavigation()
   const [query, setQuery] = useState('')
   const [view, setView] = useState<'cards' | 'table'>('cards')
   const [status, setStatus] = useState<'all' | 'active' | 'locked' | 'draft'>('all')
@@ -288,7 +288,7 @@ export function EventsView({
                   onEdit={() => handleEdit(event)}
                   onGenerateDraw={() => onGenerateDraw?.(event)}
                   onRecordRuns={() => onRecordRuns?.(event)}
-                  onViewStandings={() => (onViewStandings ? onViewStandings(event) : onNavigate?.('resultados'))}
+                  onViewStandings={() => (onViewStandings ? onViewStandings(event) : navigateTo('resultados'))}
                   onComputePayoffs={() => onComputePayoffs?.(event)}
                   onExport={() => onExportEvent(event)}
                   onDuplicate={() => handleDuplicate(event)}

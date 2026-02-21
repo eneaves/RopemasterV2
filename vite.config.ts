@@ -9,7 +9,6 @@ export default defineConfig(async () => ({
   plugins: [react()],
   resolve: {
     alias: {
-      // Allow using the `@` prefix to reference the `src` directory
       '@': '/src',
     },
   },

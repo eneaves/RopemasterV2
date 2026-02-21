@@ -1,58 +1,69 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Card } from './ui/card'
 import { EventCaptureView } from './EventCaptureView'
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './ui/select'
-import { getSeries, getEvents, listTeams } from '../lib/api'
+import { listTeams } from '../lib/api'
 import type { Event, Series } from '../types'
+import { useSeriesEvents } from '@/providers/SeriesEventsProvider'
 
 export function CaptureManagement() {
-  const [seriesList, setSeriesList] = useState<Series[]>([])
-  const [eventsList, setEventsList] = useState<Event[]>([])
-  
+  const { series: seriesList, getEventsForSeries } = useSeriesEvents()
+  const [eventTeamCounts, setEventTeamCounts] = useState<Record<string, number>>({})
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null)
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
   
   const [showCaptureView, setShowCaptureView] = useState(false)
 
-  // Load initial data
-  useEffect(() => {
-    getSeries().then((data) => {
-      setSeriesList(data)
-      const active = data.find((s) => s.status === 'active')
-      if (active) setSelectedSeriesId(active.id.toString())
-    })
-  }, [])
-
-  // Load events
-  useEffect(() => {
-    if (selectedSeriesId) {
-      getEvents(parseInt(selectedSeriesId)).then((data) => {
-        setEventsList(data)
-        const active = data.find((e) => e.status === 'active' || e.status === 'completed')
-        if (active) setSelectedEventId(active.id.toString())
-        else setSelectedEventId(null)
-      })
-    } else {
-      setEventsList([])
-    }
-  }, [selectedSeriesId])
+  const eventsList = useMemo(() => getEventsForSeries(selectedSeriesId), [getEventsForSeries, selectedSeriesId])
 
   useEffect(() => {
-    if (selectedEventId) {
-      listTeams(parseInt(selectedEventId)).then((teams) => {
-        setEventsList((prev) =>
-          prev.map((e) =>
-            e.id.toString() === selectedEventId ? { ...e, teamsCount: teams.length } : e
-          )
-        )
-      })
+    if (!selectedSeriesId && seriesList.length > 0) {
+      const active = seriesList.find((s: Series | any) => s.status === 'active')
+      const fallback = active ?? seriesList[0]
+      if (fallback) {
+        setSelectedSeriesId(String(fallback.id))
+      }
     }
+  }, [seriesList, selectedSeriesId])
+
+  useEffect(() => {
+    if (!selectedEventId && eventsList.length > 0) {
+      const active = eventsList.find((e: Event | any) => {
+        const status = String(e.status ?? '').toLowerCase()
+        return status === 'active' || status === 'completed'
+      })
+      const fallback = active ?? eventsList[0]
+      if (fallback) {
+        setSelectedEventId(String(fallback.id))
+      }
+      return
+    }
+
+    if (eventsList.length === 0 && selectedEventId) {
+      setSelectedEventId(null)
+    } else if (selectedEventId) {
+      const exists = eventsList.some((event) => String(event.id) === selectedEventId)
+      if (!exists) {
+        setSelectedEventId(eventsList.length ? String(eventsList[0].id) : null)
+      }
+    }
+  }, [eventsList, selectedEventId])
+
+  useEffect(() => {
+    if (!selectedEventId) return
+    listTeams(parseInt(selectedEventId)).then((teams) => {
+      setEventTeamCounts((prev) => ({
+        ...prev,
+        [selectedEventId]: teams.length,
+      }))
+    }).catch(() => {})
   }, [selectedEventId])
 
   const selectedSeries = seriesList.find(s => s.id.toString() === selectedSeriesId)
   const selectedEvent = eventsList.find(e => e.id.toString() === selectedEventId)
+  const teamsCount = selectedEventId ? eventTeamCounts[selectedEventId] ?? selectedEvent?.teamsCount ?? selectedEvent?.teams_count ?? '—' : '—'
 
   if (showCaptureView && selectedEvent && selectedSeries) {
     return <EventCaptureView event={selectedEvent} series={selectedSeries} onBack={() => setShowCaptureView(false)} />
@@ -145,7 +156,7 @@ export function CaptureManagement() {
                 </div>
                 <div>
                   <div className="text-xs">Equipos</div>
-                  <div className="text-foreground">{selectedEvent ? (selectedEvent.teamsCount || '—') : '—'}</div>
+                  <div className="text-foreground">{selectedEvent ? teamsCount : '—'}</div>
                 </div>
               </div>
             </div>
