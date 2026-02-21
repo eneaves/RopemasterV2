@@ -305,45 +305,49 @@ export function RopersManagement() {
               </select>
             </div>
 
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Nombre</TableHead>
-                  <TableHead>Categoría</TableHead>
-                  <TableHead>Nivel</TableHead>
-                  <TableHead>Rating</TableHead>
-                  <TableHead>¿Puede Header?</TableHead>
-                  <TableHead>¿Puede Heeler?</TableHead>
-                  <TableHead>Estatus</TableHead>
-                  <TableHead>Última Participación</TableHead>
-                  <TableHead>Acciones</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((r) => (
-                  <TableRow key={r.id}>
-                    <TableCell className="font-medium">{`${r.firstName} ${r.lastName}`}</TableCell>
-                    <TableCell><span className="inline-flex items-center rounded-full bg-muted/20 px-2 py-1 text-xs">{(r.specialty ?? '').toUpperCase()}</span></TableCell>
-                    <TableCell>
-                      <span className="inline-flex items-center rounded-full bg-muted/20 px-2 py-1 text-xs">{r.level ?? 'amateur'}</span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge className="bg-muted text-muted-foreground">{typeof r.rating === 'number' ? String(r.rating) : (r.rating ?? '-')}</Badge>
-                    </TableCell>
-                    <TableCell>{r.specialty !== 'heeler' ? <Badge className="bg-green-50 text-green-700">Sí</Badge> : <Badge className="bg-muted text-muted-foreground">No</Badge>}</TableCell>
-                    <TableCell>{r.specialty !== 'header' ? <Badge className="bg-green-50 text-green-700">Sí</Badge> : <Badge className="bg-muted text-muted-foreground">No</Badge>}</TableCell>
-                    <TableCell><Badge className="bg-green-50 text-green-700">Activo</Badge></TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{r.updatedAt ?? '-'}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="inline-flex items-center gap-2">
-                        <Button variant="outline" size="sm" onClick={() => openEdit(r)}>Editar</Button>
-                        <Button variant="destructive" size="sm" onClick={() => handleDeleteRequest(r)}>Borrar</Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <div className="overflow-x-auto">
+              <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-border/40">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-card">
+                    <TableRow>
+                      <TableHead>Nombre</TableHead>
+                      <TableHead>Categoría</TableHead>
+                      <TableHead>Nivel</TableHead>
+                      <TableHead>Rating</TableHead>
+                      <TableHead>¿Puede Header?</TableHead>
+                      <TableHead>¿Puede Heeler?</TableHead>
+                      <TableHead>Estatus</TableHead>
+                      <TableHead>Última Participación</TableHead>
+                      <TableHead>Acciones</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filtered.map((r) => (
+                      <TableRow key={r.id}>
+                        <TableCell className="font-medium">{`${r.firstName} ${r.lastName}`}</TableCell>
+                        <TableCell><span className="inline-flex items-center rounded-full bg-muted/20 px-2 py-1 text-xs">{(r.specialty ?? '').toUpperCase()}</span></TableCell>
+                        <TableCell>
+                          <span className="inline-flex items-center rounded-full bg-muted/20 px-2 py-1 text-xs">{r.level ?? 'amateur'}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge className="bg-muted text-muted-foreground">{typeof r.rating === 'number' ? String(r.rating) : (r.rating ?? '-')}</Badge>
+                        </TableCell>
+                        <TableCell>{r.specialty !== 'heeler' ? <Badge className="bg-green-50 text-green-700">Sí</Badge> : <Badge className="bg-muted text-muted-foreground">No</Badge>}</TableCell>
+                        <TableCell>{r.specialty !== 'header' ? <Badge className="bg-green-50 text-green-700">Sí</Badge> : <Badge className="bg-muted text-muted-foreground">No</Badge>}</TableCell>
+                        <TableCell><Badge className="bg-green-50 text-green-700">Activo</Badge></TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{r.updatedAt ?? '-'}</TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center gap-2">
+                            <Button variant="outline" size="sm" onClick={() => openEdit(r)}>Editar</Button>
+                            <Button variant="destructive" size="sm" onClick={() => handleDeleteRequest(r)}>Borrar</Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
           </div>
 
 

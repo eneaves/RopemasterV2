@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { listRopers, createRoper, updateRoper, deleteRoper, deleteAllRopers } from '@/lib/api'
 
-type Roper = {
+export type Roper = {
   id: number
   firstName: string
   lastName: string
@@ -13,6 +13,11 @@ type Roper = {
   email?: string | null
   createdAt?: string
   updatedAt?: string
+  status: 'active' | 'inactive'
+  externalId?: string | null
+  normalizedPhone?: string | null
+  countryCode?: string | null
+  defaultEventLevel?: 'pro' | 'amateur' | 'principiante' | null
 }
 
 export function useRopers() {
@@ -31,6 +36,11 @@ export function useRopers() {
     email: r.email ?? null,
     createdAt: r.created_at ?? r.createdAt,
     updatedAt: r.updated_at ?? r.updatedAt,
+    status: Number(r.is_active ?? 1) === 1 ? 'active' : 'inactive',
+    externalId: r.external_id ?? null,
+    normalizedPhone: r.normalized_phone ?? null,
+    countryCode: r.country_code ?? null,
+    defaultEventLevel: r.default_event_level ?? null,
   }), [])
 
   const refresh = useCallback(async () => {

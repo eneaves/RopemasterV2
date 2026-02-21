@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use rust_xlsxwriter::*;
@@ -8,6 +9,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     FromRow, Sqlite, SqlitePool, Transaction,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tauri::{Emitter, Manager, State};
 
@@ -526,23 +528,27 @@ async fn delete_event(db: State<'_, Db>, id: i64) -> Result<(), String> {
     db.require_license()?;
     let pool = &db.0;
     // Verificar existencia y estado
-    let status_opt: Option<String> =
-        sqlx::query_scalar("SELECT status FROM event WHERE id = ?1 AND is_deleted = 0")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    let row_opt = sqlx::query("SELECT status, name FROM event WHERE id = ?1 AND is_deleted = 0")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let Some(_status) = status_opt else {
+    let Some(row) = row_opt else {
         return Err("Evento no encontrado.".into());
     };
+    let _status: String = row.try_get("status").map_err(|e| e.to_string())?;
+    let current_name: String = row.try_get("name").map_err(|e| e.to_string())?;
+    let deleted_suffix = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let archived_name = format!("{}__deleted__{}", current_name, deleted_suffix);
 
     // if status == "locked" {
     //     return Err("El evento está bloqueado; no se puede eliminar.".into());
     // }
 
     // Soft-delete: marcar is_deleted = 1. No cambiamos status a 'archived' porque el CHECK constraint no lo permite.
-    let res = sqlx::query("UPDATE event SET is_deleted = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1")
+    let res = sqlx::query("UPDATE event SET is_deleted = 1, name = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?2")
+        .bind(archived_name)
         .bind(id)
         .execute(pool)
         .await
@@ -977,6 +983,11 @@ struct RoperRow {
     phone: Option<String>,
     email: Option<String>,
     level: String,
+    external_id: Option<String>,
+    normalized_phone: Option<String>,
+    country_code: Option<String>,
+    default_event_level: Option<String>,
+    is_active: i64,
     created_at: String,
     updated_at: String,
 }
@@ -990,6 +1001,10 @@ struct NewRoper {
     phone: Option<String>,
     email: Option<String>,
     level: Option<String>,
+    external_id: Option<String>,
+    normalized_phone: Option<String>,
+    country_code: Option<String>,
+    default_event_level: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1002,6 +1017,324 @@ struct UpdateRoper {
     phone: Option<String>,
     email: Option<String>,
     level: Option<String>,
+    external_id: Option<String>,
+    normalized_phone: Option<String>,
+    country_code: Option<String>,
+    default_event_level: Option<String>,
+    is_active: Option<bool>,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct EventRosterRow {
+    id: i64,
+    event_id: i64,
+    roper_id: i64,
+    status: String,
+    rating_override: Option<f64>,
+    source_hash: Option<String>,
+    notes: Option<String>,
+    created_at: String,
+    updated_at: String,
+    first_name: String,
+    last_name: String,
+    specialty: String,
+    rating: i64,
+    level: String,
+    phone: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct EventRosterSyncEntry {
+    external_id: Option<String>,
+    first_name: String,
+    last_name: String,
+    specialty: Option<String>,
+    rating: Option<f64>,
+    phone: Option<String>,
+    normalized_phone: Option<String>,
+    email: Option<String>,
+    level: Option<String>,
+    status: Option<String>,
+    rating_override: Option<f64>,
+    notes: Option<String>,
+    source_hash: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SyncEventRosterPayload {
+    event_id: i64,
+    entries: Vec<EventRosterSyncEntry>,
+    withdraw_absent: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct SyncEventRosterResult {
+    created_ropers: usize,
+    updated_ropers: usize,
+    reactivated_ropers: usize,
+    roster_upserts: usize,
+    roster_marked_withdrawn: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateEventRosterEntry {
+    id: i64,
+    status: Option<String>,
+    rating_override: Option<f64>,
+    notes: Option<String>,
+}
+
+fn normalize_level_required(raw: Option<String>) -> Result<String, String> {
+    let level = raw.unwrap_or_else(|| "amateur".to_string());
+    let normalized = level.trim().to_lowercase();
+    if normalized != "pro" && normalized != "amateur" && normalized != "principiante" {
+        return Err("Nivel inválido: use 'pro', 'amateur' o 'principiante'.".into());
+    }
+    Ok(normalized)
+}
+
+fn normalize_level_optional(raw: Option<String>) -> Result<Option<String>, String> {
+    match raw {
+        Some(value) => {
+            let normalized = value.trim().to_lowercase();
+            if normalized.is_empty() {
+                return Ok(None);
+            }
+            if normalized != "pro" && normalized != "amateur" && normalized != "principiante" {
+                return Err("Nivel inválido: use 'pro', 'amateur' o 'principiante'.".into());
+            }
+            Ok(Some(normalized))
+        }
+        None => Ok(None),
+    }
+}
+
+fn normalize_phone_value(phone: &Option<String>) -> Option<String> {
+    phone
+        .as_ref()
+        .map(|p| p.chars().filter(|c| c.is_ascii_digit()).collect::<String>())
+        .filter(|p| !p.is_empty())
+}
+
+fn clean_string(raw: &Option<String>) -> Option<String> {
+    raw.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn normalize_roster_status(raw: Option<String>) -> Result<String, String> {
+    let status = raw
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "registered".into());
+    match status.as_str() {
+        "registered" | "confirmed" | "withdrawn" => Ok(status),
+        _ => {
+            Err("Status inválido para roster: usa 'registered', 'confirmed' o 'withdrawn'.".into())
+        }
+    }
+}
+
+async fn upsert_roper_from_entry(
+    pool: &SqlitePool,
+    entry: &EventRosterSyncEntry,
+) -> Result<(i64, bool, bool, bool), String> {
+    let first_name = entry.first_name.trim();
+    if first_name.is_empty() {
+        return Err("Cada registro debe incluir first_name.".into());
+    }
+    let last_name_raw = entry.last_name.trim();
+    let last_name_owned = if last_name_raw.is_empty() {
+        "-".to_string()
+    } else {
+        last_name_raw.to_string()
+    };
+
+    let specialty_clean = entry
+        .specialty
+        .as_ref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| matches!(s.as_str(), "header" | "heeler" | "both"));
+    if entry.specialty.is_some() && specialty_clean.is_none() {
+        return Err("Specialty inválida en la importación.".into());
+    }
+    let specialty_value = specialty_clean.clone().unwrap_or_else(|| "both".into());
+
+    let rating_value = entry.rating.unwrap_or(0.0);
+    if rating_value.is_sign_negative() {
+        return Err("Rating inválido: no puede ser negativo.".into());
+    }
+    if rating_value.is_nan() {
+        return Err("Rating inválido: no puede ser NaN.".into());
+    }
+    let rating_i64 = rating_value.round() as i64;
+
+    let raw_level = entry.level.clone();
+    let normalized_level_for_insert = normalize_level_required(raw_level.clone())?;
+    let level_for_update = if raw_level.is_some() {
+        Some(normalized_level_for_insert.clone())
+    } else {
+        None
+    };
+
+    let phone_clean = clean_string(&entry.phone);
+    let normalized_phone = entry
+        .normalized_phone
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| normalize_phone_value(&entry.phone));
+    let email_clean = clean_string(&entry.email);
+    let external_id_clean = clean_string(&entry.external_id);
+
+    let mut roper_row: Option<(i64, bool)> = None;
+    if let Some(ext) = external_id_clean.as_ref() {
+        roper_row = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT id, is_active FROM roper WHERE external_id = ?1 LIMIT 1",
+        )
+        .bind(ext)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(id, is_active)| (id, is_active == 1));
+    }
+    if roper_row.is_none() {
+        if let Some(email) = email_clean.as_ref() {
+            roper_row = sqlx::query_as::<_, (i64, i64)>(
+                "SELECT id, is_active FROM roper WHERE LOWER(email) = LOWER(?1) LIMIT 1",
+            )
+            .bind(email)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|(id, is_active)| (id, is_active == 1));
+        }
+    }
+    if roper_row.is_none() {
+        if let Some(norm_phone) = normalized_phone.as_ref() {
+            roper_row = sqlx::query_as::<_, (i64, i64)>(
+                "SELECT id, is_active FROM roper WHERE normalized_phone = ?1 LIMIT 1",
+            )
+            .bind(norm_phone)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|(id, is_active)| (id, is_active == 1));
+        }
+    }
+    if roper_row.is_none() {
+        roper_row = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT id, is_active FROM roper WHERE LOWER(first_name) = LOWER(?1) AND LOWER(CASE WHEN TRIM(last_name) = '' THEN '-' ELSE last_name END) = LOWER(?2) LIMIT 1",
+        )
+        .bind(first_name)
+        .bind(&last_name_owned)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(id, is_active)| (id, is_active == 1));
+    }
+
+    if let Some((roper_id, is_active)) = roper_row {
+        let mut builder = QueryBuilder::<Sqlite>::new("UPDATE roper SET ");
+        builder
+            .push("first_name = ")
+            .push_bind(first_name.to_string())
+            .push(", ");
+        builder
+            .push("last_name = ")
+            .push_bind(last_name_owned.clone())
+            .push(", ");
+
+        if let Some(spec) = specialty_clean {
+            builder.push("specialty = ").push_bind(spec).push(", ");
+        }
+        if entry.rating.is_some() {
+            builder.push("rating = ").push_bind(rating_i64).push(", ");
+        }
+        if entry.phone.is_some() {
+            if let Some(phone) = phone_clean.as_ref() {
+                builder.push("phone = ").push_bind(phone).push(", ");
+            } else {
+                builder.push("phone = NULL, ");
+            }
+        }
+        if entry.email.is_some() {
+            if let Some(email) = email_clean.as_ref() {
+                builder.push("email = ").push_bind(email).push(", ");
+            } else {
+                builder.push("email = NULL, ");
+            }
+        }
+        if let Some(level) = level_for_update {
+            builder.push("level = ").push_bind(level).push(", ");
+        }
+        if entry.external_id.is_some() {
+            if let Some(ext) = external_id_clean.as_ref() {
+                builder.push("external_id = ").push_bind(ext).push(", ");
+            } else {
+                builder.push("external_id = NULL, ");
+            }
+        }
+        if entry.normalized_phone.is_some() || entry.phone.is_some() {
+            if let Some(norm) = normalized_phone.as_ref() {
+                builder
+                    .push("normalized_phone = ")
+                    .push_bind(norm)
+                    .push(", ");
+            } else {
+                builder.push("normalized_phone = NULL, ");
+            }
+        }
+        let mut reactivated = false;
+        if !is_active {
+            builder.push("is_active = 1, ");
+            reactivated = true;
+        }
+
+        builder
+            .push("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ")
+            .push_bind(roper_id);
+        builder
+            .build()
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok((roper_id, false, true, reactivated))
+    } else {
+        let res = sqlx::query(
+            r#"
+            INSERT INTO roper (
+                first_name,
+                last_name,
+                specialty,
+                rating,
+                phone,
+                email,
+                level,
+                external_id,
+                normalized_phone,
+                country_code,
+                default_event_level
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)
+            "#,
+        )
+        .bind(first_name)
+        .bind(&last_name_owned)
+        .bind(&specialty_value)
+        .bind(rating_i64)
+        .bind(phone_clean.clone())
+        .bind(email_clean.clone())
+        .bind(&normalized_level_for_insert)
+        .bind(external_id_clean.clone())
+        .bind(normalized_phone.clone())
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok((res.last_insert_rowid(), true, true, false))
+    }
 }
 
 #[derive(serde::Serialize, sqlx::FromRow)]
@@ -1049,9 +1382,7 @@ struct NewTeam {
     rating: f64,
 }
 
-#[tauri::command]
-async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
-    // log intent
+async fn create_team_internal(db: &Db, t: NewTeam) -> Result<i64, String> {
     tracing::info!(
         event_id = t.event_id,
         header_id = t.header_id,
@@ -1060,7 +1391,6 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
         "create_team: attempt"
     );
 
-    db.require_license()?;
     ensure_event_unlocked(&db.0, t.event_id).await?;
 
     // Validación básica: header != heeler
@@ -1075,33 +1405,61 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
         );
     }
 
-    // Verifica que existan los ropers
-    let exist: (i64, i64) = sqlx::query_as(
+    let rows =
+        sqlx::query_as::<_, (i64, i64)>("SELECT id, is_active FROM roper WHERE id = ?1 OR id = ?2")
+            .bind(t.header_id)
+            .bind(t.heeler_id)
+            .fetch_all(&db.0)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "create_team: error checking ropers");
+                e.to_string()
+            })?;
+
+    let mut header_active: Option<bool> = None;
+    let mut heeler_active: Option<bool> = None;
+    for (id, is_active) in rows {
+        if id == t.header_id {
+            header_active = Some(is_active == 1);
+        } else if id == t.heeler_id {
+            heeler_active = Some(is_active == 1);
+        }
+    }
+    if header_active.is_none() || heeler_active.is_none() {
+        tracing::error!("create_team failed: missing roper record");
+        return Err("Header o Heeler no existen en la tabla roper.".into());
+    }
+    if !header_active.unwrap() || !heeler_active.unwrap() {
+        return Err(
+            "Al menos uno de los ropers está inactivo. Rehabilítalo desde el directorio.".into(),
+        );
+    }
+
+    // Verifica que ambos estén inscritos en el roster del evento
+    let roster_counts: (i64, i64) = sqlx::query_as(
         r#"
         SELECT 
-          (SELECT COUNT(1) FROM roper WHERE id = ?1) AS h,
-          (SELECT COUNT(1) FROM roper WHERE id = ?2) AS he
+          (SELECT COUNT(1) FROM event_roster WHERE event_id = ?1 AND roper_id = ?2 AND status != 'withdrawn') AS header_count,
+          (SELECT COUNT(1) FROM event_roster WHERE event_id = ?1 AND roper_id = ?3 AND status != 'withdrawn') AS heeler_count
         "#,
     )
+    .bind(t.event_id)
     .bind(t.header_id)
     .bind(t.heeler_id)
     .fetch_one(&db.0)
     .await
     .map_err(|e| {
-        tracing::error!(error = %e, "create_team: error checking ropers");
+        tracing::error!(error = %e, event_id = t.event_id, "create_team: roster validation failed");
         e.to_string()
     })?;
 
-    if exist.0 == 0 || exist.1 == 0 {
-        tracing::error!(
-            header_exists = exist.0,
-            heeler_exists = exist.1,
-            "create_team failed: missing roper"
+    if roster_counts.0 == 0 || roster_counts.1 == 0 {
+        return Err(
+            "Ambos ropers deben estar en el roster del evento (status distinto a 'withdrawn')."
+                .into(),
         );
-        return Err("Header o Heeler no existen en la tabla roper.".into());
     }
 
-    // Inserta respetando UNIQUE(event_id, header_id, heeler_id)
     let res = sqlx::query(
         r#"
         INSERT INTO team (event_id, header_id, heeler_id, rating, status)
@@ -1113,37 +1471,33 @@ async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
     .bind(t.heeler_id)
     .bind(t.rating)
     .execute(&db.0)
-    .await;
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "create_team failed: insert error");
+        e.to_string()
+    })?;
 
-    match res {
-        Ok(r) => {
-            let last_id = r.last_insert_rowid();
-            tracing::info!(
-                event_id = t.event_id,
-                header_id = t.header_id,
-                heeler_id = t.heeler_id,
-                rating = t.rating,
-                last_row = last_id,
-                "create_team: success"
-            );
-            log_audit(
-                &db.0,
-                "create_team",
-                "team",
-                Some(last_id),
-                Some(format!("Event {}", t.event_id)),
-            )
-            .await?;
-            Ok(last_id)
+    let last_id = res.last_insert_rowid();
+    log_audit(
+        &db.0,
+        "create_team",
+        "team",
+        Some(last_id),
+        Some(format!("Event {}", t.event_id)),
+    )
+    .await?;
+    Ok(last_id)
+}
+
+#[tauri::command]
+async fn create_team(db: State<'_, Db>, t: NewTeam) -> Result<i64, String> {
+    db.require_license()?;
+    match create_team_internal(&db, t).await {
+        Ok(id) => Ok(id),
+        Err(err) if err.contains("UNIQUE") => {
+            Err("Ya existe un equipo con ese header/heeler en este evento.".into())
         }
-        Err(e) => {
-            tracing::error!(error = %e, "create_team failed: insert error");
-            if e.to_string().contains("UNIQUE") {
-                Err("Ya existe un equipo con ese header/heeler en este evento.".into())
-            } else {
-                Err(e.to_string())
-            }
-        }
+        other => other,
     }
 }
 
@@ -1237,20 +1591,41 @@ async fn get_series_logs(
 /* ------------------- ROPERS ------------------- */
 
 #[tauri::command]
-async fn list_ropers(db: State<'_, Db>) -> Result<Vec<RoperRow>, String> {
+async fn list_ropers(
+    db: State<'_, Db>,
+    include_inactive: Option<bool>,
+) -> Result<Vec<RoperRow>, String> {
     db.require_license()?;
-    // Solo retornamos ropers activos (is_active = 1) como parte de la política de soft-delete.
-    sqlx::query_as::<_, RoperRow>(
+    let include_inactive = include_inactive.unwrap_or(false);
+    let mut query = String::from(
         r#"
-        SELECT id, first_name, last_name, specialty, CAST(rating AS INTEGER) AS rating, phone, email, level, created_at, updated_at
+        SELECT id,
+               first_name,
+               last_name,
+               specialty,
+               CAST(rating AS INTEGER) AS rating,
+               phone,
+               email,
+               level,
+               external_id,
+               normalized_phone,
+               country_code,
+               default_event_level,
+               is_active,
+               created_at,
+               updated_at
         FROM roper
-        WHERE is_active = 1
-        ORDER BY last_name, first_name
         "#,
-    )
-    .fetch_all(&db.0)
-    .await
-    .map_err(|e| e.to_string())
+    );
+    if !include_inactive {
+        query.push_str("WHERE is_active = 1 ");
+    }
+    query.push_str("ORDER BY last_name, first_name");
+
+    sqlx::query_as::<_, RoperRow>(&query)
+        .fetch_all(&db.0)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1265,16 +1640,41 @@ async fn create_roper(db: State<'_, Db>, r: NewRoper) -> Result<i64, String> {
     }
 
     // validar nivel
-    let level = r.level.unwrap_or_else(|| "amateur".to_string());
-    let level_l = level.to_lowercase();
-    if level_l != "pro" && level_l != "amateur" && level_l != "principiante" {
-        return Err("Nivel inválido: use 'pro', 'amateur' o 'principiante'.".into());
-    }
+    let level_l = normalize_level_required(r.level)?;
+    let default_level = normalize_level_optional(r.default_event_level)?;
+
+    let external_id = r
+        .external_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let normalized_phone = r
+        .normalized_phone
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| normalize_phone_value(&r.phone));
+    let country_code = r
+        .country_code
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let res = sqlx::query(
         r#"
-        INSERT INTO roper (first_name, last_name, specialty, rating, phone, email, level)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        INSERT INTO roper (
+            first_name,
+            last_name,
+            specialty,
+            rating,
+            phone,
+            email,
+            level,
+            external_id,
+            normalized_phone,
+            country_code,
+            default_event_level
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         "#,
     )
     .bind(&r.first_name)
@@ -1284,6 +1684,10 @@ async fn create_roper(db: State<'_, Db>, r: NewRoper) -> Result<i64, String> {
     .bind(&r.phone)
     .bind(&r.email)
     .bind(level_l)
+    .bind(external_id)
+    .bind(normalized_phone)
+    .bind(country_code)
+    .bind(default_level)
     .execute(&db.0)
     .await
     .map_err(|e| e.to_string())?;
@@ -1338,20 +1742,74 @@ async fn update_roper(db: State<'_, Db>, r: UpdateRoper) -> Result<(), String> {
         builder.push("rating = ").push_bind(rating).push(", ");
         has_any = true;
     }
-    if let Some(phone) = r.phone {
+    if let Some(phone) = &r.phone {
         builder.push("phone = ").push_bind(phone).push(", ");
         has_any = true;
     }
-    if let Some(email) = r.email {
+    if let Some(email) = &r.email {
         builder.push("email = ").push_bind(email).push(", ");
         has_any = true;
     }
     if let Some(level) = r.level {
-        let lvl = level.to_lowercase();
-        if lvl != "pro" && lvl != "amateur" && lvl != "principiante" {
-            return Err("Nivel inválido: use 'pro', 'amateur' o 'principiante'.".into());
-        }
+        let lvl = normalize_level_required(Some(level))?;
         builder.push("level = ").push_bind(lvl).push(", ");
+        has_any = true;
+    }
+    if let Some(raw_external) = r.external_id.as_ref() {
+        let trimmed = raw_external.trim();
+        if trimmed.is_empty() {
+            builder.push("external_id = NULL, ");
+        } else {
+            builder
+                .push("external_id = ")
+                .push_bind(trimmed.to_string())
+                .push(", ");
+        }
+        has_any = true;
+    }
+
+    let mut normalized_override: Option<String> = None;
+    if let Some(raw_normalized) = r
+        .normalized_phone
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        normalized_override = Some(raw_normalized);
+    } else if r.phone.is_some() {
+        normalized_override = normalize_phone_value(&r.phone);
+    }
+    if let Some(norm_phone) = normalized_override {
+        builder
+            .push("normalized_phone = ")
+            .push_bind(norm_phone)
+            .push(", ");
+        has_any = true;
+    }
+    if let Some(raw_cc) = r.country_code.as_ref() {
+        let trimmed = raw_cc.trim();
+        if trimmed.is_empty() {
+            builder.push("country_code = NULL, ");
+        } else {
+            builder
+                .push("country_code = ")
+                .push_bind(trimmed.to_string())
+                .push(", ");
+        }
+        has_any = true;
+    }
+    if let Some(default_level) = normalize_level_optional(r.default_event_level)? {
+        builder
+            .push("default_event_level = ")
+            .push_bind(default_level)
+            .push(", ");
+        has_any = true;
+    }
+    if let Some(active) = r.is_active {
+        builder
+            .push("is_active = ")
+            .push_bind(if active { 1 } else { 0 })
+            .push(", ");
         has_any = true;
     }
 
@@ -1386,6 +1844,14 @@ async fn delete_roper(db: State<'_, Db>, id: i64) -> Result<(), String> {
         return Err("Roper no encontrado.".into());
     }
 
+    sqlx::query(
+        "UPDATE event_roster SET status = 'withdrawn', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE roper_id = ?1 AND status != 'withdrawn'",
+    )
+    .bind(id)
+    .execute(&db.0)
+    .await
+    .map_err(|e| e.to_string())?;
+
     log_audit(&db.0, "delete_roper", "roper", Some(id), None).await?;
     Ok(())
 }
@@ -1401,7 +1867,13 @@ async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
         .await
         .map_err(|e| format!("Error eliminando equipos: {e}"))?;
 
-    // Paso 2: Eliminar todos los ropers
+    // Paso 2: Eliminar todos los registros de roster
+    sqlx::query("DELETE FROM event_roster")
+        .execute(&db.0)
+        .await
+        .map_err(|e| format!("Error eliminando roster: {e}"))?;
+
+    // Paso 3: Eliminar todos los ropers
     let res = sqlx::query("DELETE FROM roper")
         .execute(&db.0)
         .await
@@ -1414,10 +1886,230 @@ async fn delete_all_ropers(db: State<'_, Db>) -> Result<i64, String> {
         "delete_all_ropers",
         "roper",
         None,
-        Some(format!("Deleted {} ropers and all teams", count)),
+        Some(format!(
+            "Deleted {} ropers, all teams, and roster entries",
+            count
+        )),
     )
     .await?;
     Ok(count)
+}
+
+#[tauri::command]
+async fn list_event_roster(
+    db: State<'_, Db>,
+    event_id: i64,
+    include_withdrawn: Option<bool>,
+) -> Result<Vec<EventRosterRow>, String> {
+    db.require_license()?;
+    let mut query = String::from(
+        r#"
+        SELECT
+            er.id,
+            er.event_id,
+            er.roper_id,
+            er.status,
+            er.rating_override,
+            er.source_hash,
+            er.notes,
+            er.created_at,
+            er.updated_at,
+            r.first_name,
+            r.last_name,
+            r.specialty,
+            CAST(r.rating AS INTEGER) AS rating,
+            r.level,
+            r.phone,
+            r.email
+        FROM event_roster er
+        JOIN roper r ON r.id = er.roper_id
+        WHERE er.event_id = ?1
+        "#,
+    );
+    if !include_withdrawn.unwrap_or(false) {
+        query.push_str("AND er.status != 'withdrawn' ");
+    }
+    query.push_str("ORDER BY r.last_name, r.first_name");
+
+    sqlx::query_as::<_, EventRosterRow>(&query)
+        .bind(event_id)
+        .fetch_all(&db.0)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_event_roster_entry(
+    db: State<'_, Db>,
+    payload: UpdateEventRosterEntry,
+) -> Result<(), String> {
+    db.require_license()?;
+    let mut builder = QueryBuilder::<Sqlite>::new("UPDATE event_roster SET ");
+    let mut changed = false;
+
+    if let Some(status) = payload.status {
+        let normalized = normalize_roster_status(Some(status))?;
+        builder.push("status = ").push_bind(normalized).push(", ");
+        changed = true;
+    }
+    if let Some(rating) = payload.rating_override {
+        if !rating.is_finite() {
+            return Err("rating_override inválido.".into());
+        }
+        builder
+            .push("rating_override = ")
+            .push_bind(rating)
+            .push(", ");
+        changed = true;
+    }
+    if let Some(notes_raw) = payload.notes {
+        if notes_raw.trim().is_empty() {
+            builder.push("notes = NULL, ");
+        } else {
+            builder
+                .push("notes = ")
+                .push_bind(notes_raw.trim().to_string())
+                .push(", ");
+        }
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    builder
+        .push("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ")
+        .push_bind(payload.id);
+    builder
+        .build()
+        .execute(&db.0)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn sync_event_roster_internal(
+    db: &Db,
+    payload: SyncEventRosterPayload,
+) -> Result<SyncEventRosterResult, String> {
+    ensure_event_unlocked(&db.0, payload.event_id).await?;
+
+    let withdraw_absent = payload.withdraw_absent.unwrap_or(true);
+    let mut created_ropers = 0usize;
+    let mut updated_ropers = 0usize;
+    let mut reactivated_ropers = 0usize;
+    let mut roster_upserts = 0usize;
+    let mut processed: HashSet<i64> = HashSet::new();
+
+    for entry in &payload.entries {
+        let (roper_id, created, updated, reactivated) =
+            upsert_roper_from_entry(&db.0, entry).await?;
+        if created {
+            created_ropers += 1;
+        } else if updated {
+            updated_ropers += 1;
+        }
+        if reactivated {
+            reactivated_ropers += 1;
+        }
+        processed.insert(roper_id);
+
+        let status = normalize_roster_status(entry.status.clone())?;
+        let rating_override = match entry.rating_override {
+            Some(value) => {
+                if !value.is_finite() {
+                    return Err("rating_override inválido.".into());
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        let notes = clean_string(&entry.notes);
+        let source_hash = clean_string(&entry.source_hash);
+
+        sqlx::query(
+            r#"
+            INSERT INTO event_roster (event_id, roper_id, status, rating_override, source_hash, notes, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            ON CONFLICT(event_id, roper_id)
+            DO UPDATE SET
+                status = excluded.status,
+                rating_override = excluded.rating_override,
+                source_hash = excluded.source_hash,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(payload.event_id)
+        .bind(roper_id)
+        .bind(status)
+        .bind(rating_override)
+        .bind(source_hash)
+        .bind(notes)
+        .execute(&db.0)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        roster_upserts += 1;
+    }
+
+    let mut roster_marked_withdrawn = 0usize;
+    if withdraw_absent {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "UPDATE event_roster SET status = 'withdrawn', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE event_id = ",
+        );
+        builder.push_bind(payload.event_id);
+        if !processed.is_empty() {
+            builder.push(" AND roper_id NOT IN (");
+            let mut separated = builder.separated(", ");
+            for roper_id in processed.iter() {
+                separated.push_bind(roper_id);
+            }
+            builder.push(")");
+        }
+        builder.push(" AND status != 'withdrawn'");
+
+        let res = builder
+            .build()
+            .execute(&db.0)
+            .await
+            .map_err(|e| e.to_string())?;
+        roster_marked_withdrawn = res.rows_affected() as usize;
+    }
+
+    log_audit(
+        &db.0,
+        "sync_event_roster",
+        "event_roster",
+        Some(payload.event_id),
+        Some(format!(
+            "entries={} created={} updated={} reactivated={} withdrawn={}",
+            payload.entries.len(),
+            created_ropers,
+            updated_ropers,
+            reactivated_ropers,
+            roster_marked_withdrawn
+        )),
+    )
+    .await?;
+
+    Ok(SyncEventRosterResult {
+        created_ropers,
+        updated_ropers,
+        reactivated_ropers,
+        roster_upserts,
+        roster_marked_withdrawn,
+    })
+}
+
+#[tauri::command]
+async fn sync_event_roster(
+    db: State<'_, Db>,
+    payload: SyncEventRosterPayload,
+) -> Result<SyncEventRosterResult, String> {
+    db.require_license()?;
+    sync_event_roster_internal(&db, payload).await
 }
 
 #[derive(serde::Deserialize)]
@@ -2871,6 +3563,9 @@ pub fn run() {
             update_roper,
             delete_roper,
             delete_all_ropers,
+            list_event_roster,
+            update_event_roster_entry,
+            sync_event_roster,
             // payoff rules
             list_payoff_rules,
             delete_payoff_rule,
@@ -2906,4 +3601,280 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use license::{LicenseCache, LicenseState};
+    use license_core::{LicensePayload, DEFAULT_APP_ID, PAYLOAD_VERSION_CURRENT};
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+    use time::OffsetDateTime;
+
+    async fn setup_test_db() -> Db {
+        let db_path = std::env::temp_dir().join(format!("roping-tests-{}.sqlite", Uuid::new_v4()));
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .expect("failed to open sqlite database");
+        let _ = sqlx::query("DROP TABLE IF EXISTS _sqlx_migrations")
+            .execute(&pool)
+            .await;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations failed");
+
+        let state = LicenseState::default();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        state.replace(Some(LicenseCache {
+            payload: mock_license_payload(now),
+            installed_at: now,
+            last_verified_at: now,
+        }));
+
+        Db(pool, state)
+    }
+
+    fn mock_license_payload(now: i64) -> LicensePayload {
+        LicensePayload {
+            ver: PAYLOAD_VERSION_CURRENT,
+            key_id: 1,
+            serial: 1,
+            license_id: "test-license".into(),
+            issued_at: now as u64,
+            not_before: (now - 60) as u64,
+            not_after: (now + 60 * 60) as u64,
+            max_clock_skew: 60,
+            allowed_device_hash: [0; 32],
+            plan: "monthly".into(),
+            features: BTreeMap::new(),
+            policy: BTreeMap::new(),
+            customer_name: Some("QA".into()),
+            app_id: DEFAULT_APP_ID.into(),
+        }
+    }
+
+    async fn seed_event(db: &Db) -> i64 {
+        let series_id =
+            sqlx::query("INSERT INTO series (name, season, status) VALUES (?1, ?2, 'active')")
+                .bind("Serie QA")
+                .bind("2026")
+                .execute(&db.0)
+                .await
+                .expect("insert series failed")
+                .last_insert_rowid();
+
+        sqlx::query(
+            "INSERT INTO event (series_id, name, date, status, rounds, location, entry_fee, prize_pool) VALUES (?1, 'Evento QA', '2026-02-21', 'active', 2, 'Arena', 100, 500)",
+        )
+        .bind(series_id)
+        .execute(&db.0)
+        .await
+        .expect("insert event failed")
+        .last_insert_rowid()
+    }
+
+    async fn roper_id_by_email(db: &Db, email: &str) -> i64 {
+        sqlx::query_scalar("SELECT id FROM roper WHERE email = ?1")
+            .bind(email)
+            .fetch_one(&db.0)
+            .await
+            .expect("roper not found by email")
+    }
+
+    fn roster_entry(
+        first: &str,
+        last: &str,
+        email: &str,
+        specialty: &str,
+        status: &str,
+    ) -> EventRosterSyncEntry {
+        EventRosterSyncEntry {
+            external_id: Some(format!("{}-{}", first, last)),
+            first_name: first.to_string(),
+            last_name: last.to_string(),
+            specialty: Some(specialty.to_string()),
+            rating: Some(4.0),
+            phone: None,
+            normalized_phone: None,
+            email: Some(email.to_string()),
+            level: Some("amateur".into()),
+            status: Some(status.to_string()),
+            rating_override: None,
+            notes: None,
+            source_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_event_roster_allows_team_creation() {
+        let db = setup_test_db().await;
+        let event_id = seed_event(&db).await;
+
+        let payload = SyncEventRosterPayload {
+            event_id,
+            entries: vec![
+                roster_entry(
+                    "Ana",
+                    "Header",
+                    "ana.header@example.com",
+                    "header",
+                    "confirmed",
+                ),
+                roster_entry(
+                    "Ben",
+                    "Heeler",
+                    "ben.heeler@example.com",
+                    "heeler",
+                    "confirmed",
+                ),
+            ],
+            withdraw_absent: Some(true),
+        };
+
+        let result = sync_event_roster_internal(&db, payload)
+            .await
+            .expect("sync roster");
+        assert!(result.created_ropers >= 2);
+        let roster_records: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM event_roster WHERE event_id = ?1 AND status != 'withdrawn'",
+        )
+        .bind(event_id)
+        .fetch_one(&db.0)
+        .await
+        .expect("count roster rows");
+        assert_eq!(roster_records, 2);
+
+        let header_id = roper_id_by_email(&db, "ana.header@example.com").await;
+        let heeler_id = roper_id_by_email(&db, "ben.heeler@example.com").await;
+
+        let team_id = create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id,
+                rating: 8.0,
+            },
+        )
+        .await
+        .expect("team created");
+        assert!(team_id > 0);
+    }
+
+    #[tokio::test]
+    async fn create_team_requires_active_roster_entries() {
+        let db = setup_test_db().await;
+        let event_id = seed_event(&db).await;
+
+        // Only header is on the roster initially
+        sync_event_roster_internal(
+            &db,
+            SyncEventRosterPayload {
+                event_id,
+                entries: vec![roster_entry(
+                    "Solo",
+                    "Header",
+                    "solo.header@example.com",
+                    "header",
+                    "confirmed",
+                )],
+                withdraw_absent: Some(true),
+            },
+        )
+        .await
+        .expect("sync header only");
+
+        let heeler_id = sqlx::query(
+            "INSERT INTO roper (first_name, last_name, specialty, rating, email, level) VALUES ('Hank','Heeler','heeler',3,'hank.heeler@example.com','amateur')",
+        )
+        .execute(&db.0)
+        .await
+        .expect("insert heeler row")
+        .last_insert_rowid();
+        let header_id = roper_id_by_email(&db, "solo.header@example.com").await;
+
+        let err = create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id,
+                rating: 7.0,
+            },
+        )
+        .await
+        .expect_err("should fail because heeler not in roster");
+        assert!(err.contains("roster"), "unexpected error message: {}", err);
+
+        // Add heeler but withdrawn
+        sync_event_roster_internal(
+            &db,
+            SyncEventRosterPayload {
+                event_id,
+                entries: vec![roster_entry(
+                    "Hank",
+                    "Heeler",
+                    "hank.heeler@example.com",
+                    "heeler",
+                    "withdrawn",
+                )],
+                withdraw_absent: Some(false),
+            },
+        )
+        .await
+        .expect("sync heeler as withdrawn");
+
+        let err = create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id,
+                rating: 7.0,
+            },
+        )
+        .await
+        .expect_err("should fail because heeler withdrawn");
+        assert!(err.contains("roster"));
+
+        // Reactivate heeler and ensure success
+        sync_event_roster_internal(
+            &db,
+            SyncEventRosterPayload {
+                event_id,
+                entries: vec![roster_entry(
+                    "Hank",
+                    "Heeler",
+                    "hank.heeler@example.com",
+                    "heeler",
+                    "confirmed",
+                )],
+                withdraw_absent: Some(false),
+            },
+        )
+        .await
+        .expect("reactivate heeler");
+
+        create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id,
+                rating: 7.5,
+            },
+        )
+        .await
+        .expect("team should succeed once roster is active");
+    }
 }

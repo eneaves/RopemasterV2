@@ -209,29 +209,40 @@ fn parse_seconds_only(text: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    fn approx_equal(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() <= eps
+    }
+
     #[test]
     fn test_parse_seconds_only() {
-        assert_eq!(parse_seconds_only("103.474"), Some(103.474));
-        assert_eq!(parse_seconds_only("103.47"), Some(103.47));
-        assert_eq!(parse_seconds_only("  103.47  "), Some(103.47));
-        assert_eq!(parse_seconds_only("Time: 103.47"), Some(103.47));
+        let val = parse_seconds_only("103.474").unwrap();
+        assert!(approx_equal(val, 103.474, 1e-6));
+        let val = parse_seconds_only("103.47").unwrap();
+        assert!(approx_equal(val, 103.47, 1e-6));
+        let val = parse_seconds_only("  103.47  ").unwrap();
+        assert!(approx_equal(val, 103.47, 1e-6));
+        let val = parse_seconds_only("Time: 103.47").unwrap();
+        assert!(approx_equal(val, 103.47, 1e-6));
     }
 
     #[test]
     fn test_parse_minutes_seconds() {
-        assert_eq!(parse_minutes_seconds("1:43.474"), Some(103.474));
-        assert_eq!(parse_minutes_seconds("1:43.47"), Some(103.47));
-        assert_eq!(parse_minutes_seconds("2:30.00"), Some(150.0));
+        let val = parse_minutes_seconds("1:43.474").unwrap();
+        assert!(approx_equal(val, 103.474, 1e-6));
+        let val = parse_minutes_seconds("1:43.47").unwrap();
+        assert!(approx_equal(val, 103.47, 1e-6));
+        let val = parse_minutes_seconds("2:30.00").unwrap();
+        assert!(approx_equal(val, 150.0, 1e-6));
     }
 
     #[test]
     fn test_parse_timer_line() {
         let event = parse_timer_line("103.474");
         assert!(event.is_some());
-        assert_eq!(event.unwrap().time_seconds, 103.474);
+        assert!(approx_equal(event.unwrap().time_seconds, 103.474, 1e-6));
 
         let event = parse_timer_line("1:43.47");
         assert!(event.is_some());
-        assert_eq!(event.unwrap().time_seconds, 103.47);
+        assert!(approx_equal(event.unwrap().time_seconds, 103.47, 1e-6));
     }
 }

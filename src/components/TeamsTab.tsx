@@ -1,9 +1,10 @@
-import { useMemo, useState, useEffect } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import {
   Plus, Edit, Trash2, Zap, Search, MoreVertical, Eye, AlertTriangle, CheckCircle, XCircle,
 } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
+import { Textarea } from './ui/textarea'
 import { Badge } from './ui/badge'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -21,7 +22,10 @@ import { toast } from 'sonner'
 import { AddTeamModal } from './AddTeamModal'
 import { useTeams } from '@/hooks/useTeams'
 import { hardDeleteTeamsForEvent, listTeams } from '@/lib/api'
-import { useRopers } from '@/hooks/useRopers'
+import { useRopers, type Roper } from '@/hooks/useRopers'
+import { useEventRoster, type EventRosterEntry } from '@/hooks/useEventRoster'
+import type { EventRosterSyncEntry } from '@/lib/api'
+import * as XLSX from 'xlsx'
 
 interface TeamsTabProps {
   event: any
@@ -55,7 +59,14 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   const eventIdStr: string = String(event?.id ?? '')
   const eventIdNum: number = Number(event?.id ?? 0)
   const { teams, add, edit, remove, refresh } = useTeams(eventIdNum, !!isLocked)
-  const { ropers } = useRopers()
+  const {
+    roster: eventRoster,
+    activeRoster,
+    sync: syncRosterEntries,
+    refresh: refreshEventRoster,
+    updateEntry: updateRosterEntry,
+  } = useEventRoster(eventIdNum)
+  const { ropers: globalRopers } = useRopers()
 
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'valid' | 'exceeds' | 'incomplete'>('all')
@@ -74,6 +85,12 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   // starts empty; auto-create will push exclusions when needed
   // const [exclusions, setExclusions] = useState<Exclusion[]>([])
   const [exclusions] = useState<Exclusion[]>([])
+  const rosterFileRef = useRef<HTMLInputElement | null>(null)
+  const [syncingRoster, setSyncingRoster] = useState(false)
+  const [isRosterModalOpen, setIsRosterModalOpen] = useState(false)
+  const [isDirectoryModalOpen, setIsDirectoryModalOpen] = useState(false)
+  const [directoryQuery, setDirectoryQuery] = useState('')
+  const [addingRoperId, setAddingRoperId] = useState<number | null>(null)
 
   const eventId: string = eventIdStr
   const maxRating: number = event?.max_team_rating ?? event?.maxRating ?? event?.maxTeamRating ?? 0
@@ -85,12 +102,74 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
     return 'valid'
   }
 
-  // Map for fast roper lookup
+  // Map for fast roper lookup (prioriza el roster del evento)
   const roperMap = useMemo(() => {
     const map = new Map<number, any>()
-    ropers.forEach(r => map.set(Number(r.id), r))
+    eventRoster.forEach((r) => {
+      map.set(Number(r.roperId), {
+        id: Number(r.roperId),
+        firstName: r.firstName,
+        lastName: r.lastName,
+        specialty: r.specialty,
+        rating: Number(r.ratingOverride ?? r.rating ?? 0),
+        level: r.level,
+        phone: r.phone,
+        email: r.email,
+        rosterStatus: r.status,
+      })
+    })
+    globalRopers.forEach((r) => {
+      if (!map.has(Number(r.id))) {
+        map.set(Number(r.id), r)
+      }
+    })
     return map
-  }, [ropers])
+  }, [eventRoster, globalRopers])
+
+  const rosterStatusTokens: Record<string, { label: string; className: string }> = {
+    confirmed: { label: 'Confirmado', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+    registered: { label: 'Registrado', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+    withdrawn: { label: 'Retirado', className: 'bg-red-50 text-red-700 border-red-200' },
+  }
+
+  const renderRosterBadge = (roperId: number) => {
+    const meta = roperMap.get(Number(roperId))
+    if (!meta?.rosterStatus) return null
+    const token = rosterStatusTokens[meta.rosterStatus] ?? { label: meta.rosterStatus, className: 'bg-muted text-foreground border-border' }
+    return (
+      <Badge variant="outline" className={`ml-2 ${token.className}`}>
+        {token.label}
+      </Badge>
+    )
+  }
+
+  const rosterOptions = useMemo(() => {
+    if (activeRoster.length > 0) {
+      return activeRoster.map((r) => ({
+        id: Number(r.roperId),
+        label: `${r.firstName} ${r.lastName} — ${r.level} (${r.status === 'confirmed' ? 'Confirmado' : 'Registrado'})`,
+        rating: Number(r.ratingOverride ?? r.rating ?? 0),
+      }))
+    }
+    return globalRopers.map((r) => ({
+      id: r.id,
+      label: `${r.firstName} ${r.lastName} — ${r.level ?? 'amateur'}`,
+      rating: r.rating,
+    }))
+  }, [activeRoster, globalRopers])
+
+  const rosterIds = useMemo(() => new Set(activeRoster.map((r) => Number(r.roperId))), [activeRoster])
+
+  const filteredDirectory = useMemo(() => {
+    const q = directoryQuery.trim().toLowerCase()
+    return globalRopers
+      .filter((r) => {
+        if (!q) return true
+        return `${r.firstName} ${r.lastName}`.toLowerCase().includes(q) ||
+          String(r.email ?? '').toLowerCase().includes(q)
+      })
+      .sort((a, b) => a.lastName.localeCompare(b.lastName))
+  }, [globalRopers, directoryQuery])
 
   // NOTE: `useTeams(eventId)` ya carga solo los equipos del evento actual.
   // El filtro por `event_id` era redundante y en algunos casos causaba que
@@ -197,9 +276,9 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
           if (!hid || !cid) return false
           if (String(hid) === String(cid)) return false
 
-          // lookup ratings from ropers list if available
-          const headerR = ropers.find((x) => String(x.id) === String(hid))
-          const heelerR = ropers.find((x) => String(x.id) === String(cid))
+          // lookup ratings from roster/global ropers if available
+          const headerR = roperMap.get(Number(hid))
+          const heelerR = roperMap.get(Number(cid))
 
           const ratingHeader = Number(team.rating_header ?? team.headerRating ?? headerR?.rating ?? 0)
           const ratingHeeler = Number(team.rating_heeler ?? team.heelerRating ?? heelerR?.rating ?? 0)
@@ -265,6 +344,25 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
     const teamRating = headerRating + heelerRating
     const status = calculateTeamStatus(headerRating, heelerRating)
 
+    const headerMeta = roperMap.get(Number(header_id))
+    const heelerMeta = roperMap.get(Number(heeler_id))
+
+    if (!headerMeta || headerMeta.rosterStatus === 'withdrawn') {
+      toast.error('El header seleccionado no forma parte del roster activo.')
+      return
+    }
+    if (!heelerMeta || heelerMeta.rosterStatus === 'withdrawn') {
+      toast.error('El heeler seleccionado no forma parte del roster activo.')
+      return
+    }
+
+    const pendingConfirmations = [headerMeta, heelerMeta].filter(
+      (meta) => meta.rosterStatus !== 'confirmed',
+    )
+    if (pendingConfirmations.length > 0) {
+      toast.warning('Hay ropers sin confirmar en el roster. Revisa sus estados antes de continuar.')
+    }
+
     try {
       if (editingTeam && (editingTeam as any).id) {
         // actualizar rating/status simple
@@ -288,6 +386,155 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
     setEditingTeam(null)
   }
 
+  const parseRosterFile = async (file: File): Promise<EventRosterSyncEntry[]> => {
+    const buf = await file.arrayBuffer()
+    const wb = XLSX.read(buf, { type: 'array' })
+    const ws = wb.Sheets[wb.SheetNames[0]]
+    const json: any[] = XLSX.utils.sheet_to_json<any>(ws, { defval: '' })
+    const norm = (val: any) => String(val ?? '').trim()
+    const get = (row: any, keys: string[]) => {
+      for (const key of keys) {
+        if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
+          return String(row[key])
+        }
+      }
+      return ''
+    }
+
+    const normalized = json
+      .map((row) => {
+        const first = norm(get(row, ['first_name', 'nombre', 'name', 'first']))
+        if (!first) return null
+        const last = norm(get(row, ['last_name', 'apellido', 'apellidos', 'last'])) || '-'
+        const specialtyRaw = norm(get(row, ['specialty', 'especialidad', 'role', 'posicion'])).toLowerCase()
+        const levelRaw = norm(get(row, ['level', 'nivel', 'categoria'])).toLowerCase()
+        const statusRaw = norm(get(row, ['status', 'estado'])).toLowerCase()
+        const externalId = norm(get(row, ['external_id', 'id_externo', 'folio']))
+        const phone = norm(get(row, ['phone', 'telefono', 'tel']))
+        const email = norm(get(row, ['email', 'correo']))
+        const ratingStr = get(row, ['rating', 'handicap', 'puntaje'])
+        const overrideStr = get(row, ['rating_override', 'rating_override', 'override'])
+        const notes = norm(get(row, ['notes', 'comentarios', 'observaciones']))
+        const sourceHash = norm(get(row, ['source_hash', 'hash']))
+
+        const specialty =
+          specialtyRaw.includes('header') || specialtyRaw.includes('cabe') ? 'header'
+          : specialtyRaw.includes('heeler') || specialtyRaw.includes('pial') ? 'heeler'
+          : specialtyRaw.includes('both') || specialtyRaw.includes('ambos') ? 'both'
+          : undefined
+
+        const level: EventRosterSyncEntry['level'] | undefined =
+          levelRaw === 'pro' ? 'pro'
+          : levelRaw === 'principiante' || levelRaw === 'beginner' ? 'principiante'
+          : levelRaw === 'amateur' ? 'amateur'
+          : undefined
+
+        const status: EventRosterSyncEntry['status'] | undefined =
+          statusRaw === 'confirmed' || statusRaw === 'confirmado' ? 'confirmed'
+          : statusRaw === 'withdrawn' || statusRaw === 'retirado' ? 'withdrawn'
+          : statusRaw === 'registered' || statusRaw === 'registrado' ? 'registered'
+          : undefined
+
+        const ratingVal = Number(ratingStr)
+        const ratingOverride = Number(overrideStr)
+
+        const entry: EventRosterSyncEntry = {
+          first_name: first,
+          last_name: last,
+          specialty,
+          rating: Number.isFinite(ratingVal) ? ratingVal : undefined,
+          phone: phone || undefined,
+          normalized_phone: phone ? phone.replace(/[^0-9]/g, '') : undefined,
+          email: email || undefined,
+          level,
+          status,
+          rating_override: Number.isFinite(ratingOverride) ? ratingOverride : undefined,
+          notes: notes || undefined,
+          external_id: externalId || undefined,
+          source_hash: sourceHash || undefined,
+        }
+        return entry
+      })
+      .filter((entry): entry is EventRosterSyncEntry => Boolean(entry && entry.first_name))
+
+    if (normalized.length === 0) {
+      throw new Error('El archivo no contiene filas válidas (se requiere nombre).')
+    }
+    return normalized
+  }
+
+  const handleRosterFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!eventIdNum || Number.isNaN(eventIdNum)) {
+      toast.error('Selecciona un evento antes de importar el roster.')
+      e.target.value = ''
+      return
+    }
+    setSyncingRoster(true)
+    try {
+      const entries = await parseRosterFile(file)
+      await syncRosterEntries(entries, true)
+      await refreshEventRoster(true)
+    } catch (err: any) {
+      toast.error(String(err?.message ?? err))
+    } finally {
+      e.target.value = ''
+      setSyncingRoster(false)
+    }
+  }
+
+  const handleAddRoperFromDirectory = async (roper: Roper) => {
+    if (!eventIdNum || Number.isNaN(eventIdNum)) {
+      toast.error('Selecciona un evento antes de agregar ropers.')
+      return
+    }
+    setAddingRoperId(roper.id)
+    try {
+        const entry: EventRosterSyncEntry = {
+          external_id: roper.externalId ?? String(roper.id),
+          first_name: roper.firstName,
+          last_name: roper.lastName,
+          specialty: roper.specialty,
+          rating: roper.rating,
+          phone: roper.phone ?? undefined,
+          normalized_phone: roper.normalizedPhone ?? undefined,
+          email: roper.email ?? undefined,
+          level: roper.level,
+          status: 'registered',
+          rating_override: null,
+          notes: null,
+          source_hash: undefined,
+      }
+      await syncRosterEntries([entry], false)
+      toast.success(`${roper.firstName} agregado al roster`)
+    } catch (err: any) {
+      toast.error(String(err?.message ?? err))
+    } finally {
+      setAddingRoperId(null)
+    }
+  }
+
+  const handleRosterStatusChange = async (entryId: number, status: EventRosterEntry['status']) => {
+    try {
+      await updateRosterEntry({ id: entryId, status })
+    } catch (err) {
+      console.error('update roster status error', err)
+    }
+  }
+
+  const handleRosterNotesBlur = async (entryId: number, notes: string) => {
+    const entry = eventRoster.find((r) => r.id === entryId)
+    const trimmed = notes.trim()
+    const current = (entry?.notes ?? '').trim()
+    if (trimmed === current) return
+    try {
+      await updateRosterEntry({ id: entryId, notes: trimmed })
+    } catch (err) {
+      console.error('update roster notes error', err)
+    }
+  }
+
   const handleAutoCreateTeams = async () => {
     if (isLocked) {
       toast.error('Evento bloqueado. No puedes autogenerar equipos.')
@@ -306,7 +553,17 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
             toast.error('No se pudo limpiar equipos previos antes de auto-crear.');
         }
 
-        const all = ropers || []
+        const rosterCandidates = activeRoster.length > 0
+          ? activeRoster.map((r) => ({
+              id: Number(r.roperId),
+              firstName: r.firstName,
+              lastName: r.lastName,
+              specialty: r.specialty,
+              rating: Number(r.ratingOverride ?? r.rating ?? 0),
+            }))
+          : globalRopers
+
+        const all = rosterCandidates || []
         const headers = all.filter((r: any) => r.specialty === 'header' || r.specialty === 'both')
         const heelers = all.filter((r: any) => r.specialty === 'heeler' || r.specialty === 'both')
 
@@ -450,6 +707,175 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
         </div>
       </div>
 
+      <Dialog open={isRosterModalOpen} onOpenChange={setIsRosterModalOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Roster del Evento</DialogTitle>
+            <DialogDescription>
+              Actualiza el estado y las notas de los participantes antes de emparejarlos.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto border rounded-lg">
+            {eventRoster.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground">No hay ropers registrados para este evento todavía.</div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Roper</TableHead>
+                    <TableHead>Estatus</TableHead>
+                    <TableHead>Notas</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {eventRoster.map((entry) => (
+                    <TableRow key={entry.id}>
+                      <TableCell>
+                        <div className="font-medium text-foreground">
+                          {entry.firstName} {entry.lastName}
+                          {renderRosterBadge(entry.roperId)}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {entry.email ?? 'Sin correo'} · {entry.specialty}
+                        </p>
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={entry.status}
+                          onValueChange={(value) =>
+                            handleRosterStatusChange(entry.id, value as EventRosterEntry['status'])
+                          }
+                          disabled={isLocked}
+                        >
+                          <SelectTrigger className="w-[160px]">
+                            <SelectValue placeholder="Estatus" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="registered">Registrado</SelectItem>
+                            <SelectItem value="confirmed">Confirmado</SelectItem>
+                            <SelectItem value="withdrawn">Retirado</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Textarea
+                          defaultValue={entry.notes ?? ''}
+                          placeholder="Notas internas"
+                          className="min-h-[60px]"
+                          disabled={isLocked}
+                          onBlur={(e) => handleRosterNotesBlur(entry.id, e.target.value)}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setIsRosterModalOpen(false)}>
+              Cerrar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isDirectoryModalOpen} onOpenChange={setIsDirectoryModalOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Seleccionar ropers del directorio</DialogTitle>
+            <DialogDescription>
+              Filtra y agrega competidores del directorio global al roster del evento actual.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+              <Input
+                placeholder="Buscar por nombre o correo..."
+                value={directoryQuery}
+                onChange={(e) => setDirectoryQuery(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+            <Badge variant="outline" className="px-3 py-1 text-sm">
+              {filteredDirectory.length} disponibles
+            </Badge>
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto rounded-lg border">
+            <Table>
+              <TableHeader className="sticky top-0 bg-card">
+                <TableRow>
+                  <TableHead>Nombre</TableHead>
+                  <TableHead>Rol</TableHead>
+                  <TableHead>Nivel</TableHead>
+                  <TableHead>Rating</TableHead>
+                  <TableHead>Estado</TableHead>
+                  <TableHead className="text-right">Acciones</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredDirectory.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-center py-6 text-muted-foreground">
+                      No hay ropers disponibles con los filtros actuales.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filteredDirectory.map((roper) => {
+                    const alreadyInRoster = rosterIds.has(Number(roper.id))
+                    const disableAdd = roper.status !== 'active' || alreadyInRoster || addingRoperId === roper.id
+                    return (
+                      <TableRow key={roper.id}>
+                        <TableCell>
+                          <div className="font-medium text-foreground">
+                            {roper.firstName} {roper.lastName}
+                          </div>
+                          <p className="text-xs text-muted-foreground">{roper.email ?? 'Sin correo'}</p>
+                        </TableCell>
+                        <TableCell>{roper.specialty}</TableCell>
+                        <TableCell>{roper.level}</TableCell>
+                        <TableCell>{roper.rating}</TableCell>
+                        <TableCell>
+                          <div className="flex gap-2 flex-wrap">
+                            <Badge variant={roper.status === 'active' ? 'outline' : 'destructive'}>
+                              {roper.status === 'active' ? 'Activo' : 'Inactivo'}
+                            </Badge>
+                            {alreadyInRoster ? (
+                              <Badge className="bg-green-100 text-green-800 border-green-200">En roster</Badge>
+                            ) : (
+                              <Badge className="bg-muted text-muted-foreground">Disponible</Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            disabled={disableAdd}
+                            onClick={() => handleAddRoperFromDirectory(roper)}
+                          >
+                            {alreadyInRoster
+                              ? 'Ya agregado'
+                              : addingRoperId === roper.id
+                              ? 'Agregando...'
+                              : 'Agregar'}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setIsDirectoryModalOpen(false)}>
+              Cerrar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Resumen */}
       <div className="bg-card rounded-xl border border-border shadow-sm p-6">
         <div className="grid grid-cols-2 md:grid-cols-6 gap-6">
@@ -468,8 +894,8 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
             <p className="text-2xl text-foreground">{filteredTeams.length}</p>
           </div>
           <div>
-            <p className="text-muted-foreground mb-1">Ropers</p>
-            <p className="text-2xl text-foreground">{ropers.length}</p>
+            <p className="text-muted-foreground mb-1">Ropers (Roster)</p>
+            <p className="text-2xl text-foreground">{activeRoster.length || eventRoster.length || globalRopers.length}</p>
           </div>
           <div>
             <p className="text-muted-foreground mb-1">Máx Rating</p>
@@ -481,6 +907,47 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
               {isLocked ? '🔒 Bloqueado' : '✓ Editable'}
             </p>
           </div>
+        </div>
+      </div>
+
+      <div className="bg-muted/30 border border-dashed border-border rounded-xl p-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-sm text-muted-foreground mb-1">Roster del evento</p>
+          <p className="text-foreground font-medium">{activeRoster.length} activos / {eventRoster.length} total</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            className="rounded-xl"
+            disabled={syncingRoster || isLocked}
+            onClick={() => rosterFileRef.current?.click()}
+          >
+            {syncingRoster ? 'Sincronizando...' : 'Importar Excel'}
+          </Button>
+          <input ref={rosterFileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={handleRosterFile} />
+          <Button
+            variant="ghost"
+            className="rounded-xl"
+            disabled={syncingRoster}
+            onClick={() => refreshEventRoster(true)}
+          >
+            Actualizar
+          </Button>
+          <Button
+            variant="secondary"
+            className="rounded-xl"
+            onClick={() => setIsRosterModalOpen(true)}
+          >
+            Ver / Editar Roster
+          </Button>
+          <Button
+            variant="outline"
+            className="rounded-xl"
+            disabled={isLocked}
+            onClick={() => setIsDirectoryModalOpen(true)}
+          >
+            Seleccionar del Directorio
+          </Button>
         </div>
       </div>
 
@@ -602,20 +1069,22 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
                   <TableCell className="text-foreground">
                     {team.headerName || String(team.header_id)}
                     {(() => {
-                         const r = ropers.find(x => String(x.id) === String(team.header_id))
-                         return r?.level ? ` — ${r.level}` : ''
+                      const r = roperMap.get(Number(team.header_id))
+                      return r?.level ? ` — ${r.level}` : ''
                     })()}
+                    {renderRosterBadge(Number(team.header_id))}
                   </TableCell>
                   <TableCell className="text-foreground">
                     {team.heelerName || String(team.heeler_id)}
                     {(() => {
-                         const r = ropers.find(x => String(x.id) === String(team.heeler_id))
-                         return r?.level ? ` — ${r.level}` : ''
+                      const r = roperMap.get(Number(team.heeler_id))
+                      return r?.level ? ` — ${r.level}` : ''
                     })()}
+                    {renderRosterBadge(Number(team.heeler_id))}
                   </TableCell>
                   <TableCell>
                     {(() => {
-                      const headerR = ropers.find((x) => String(x.id) === String(team.header_id))
+                      const headerR = roperMap.get(Number(team.header_id))
                       const hr = headerR ? Number(headerR.rating ?? 0) : null
                       return (
                         <Badge className={ratingBadgeColor(hr ?? 0)}>{hr !== null && hr !== undefined && hr >= 0 ? String(hr) : '-'}</Badge>
@@ -624,7 +1093,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
                   </TableCell>
                   <TableCell>
                     {(() => {
-                      const heelerR = ropers.find((x) => String(x.id) === String(team.heeler_id))
+                      const heelerR = roperMap.get(Number(team.heeler_id))
                       const he = heelerR ? Number(heelerR.rating ?? 0) : null
                       return (
                         <Badge className={ratingBadgeColor(he ?? 0)}>{he !== null && he !== undefined && he >= 0 ? String(he) : '-'}</Badge>
@@ -680,7 +1149,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
       <AddTeamModal
         isOpen={isCreateModalOpen}
         onClose={() => { setIsCreateModalOpen(false); setEditingTeam(null) }}
-  roperOptions={ropers.map((r) => ({ id: r.id, label: `${r.firstName} ${r.lastName} — ${r.level ?? 'amateur'}`, rating: r.rating }))}
+        roperOptions={rosterOptions}
         onAddTeam={(data) => {
           handleAddOrUpdateTeam({
             header_id: data.header_id,

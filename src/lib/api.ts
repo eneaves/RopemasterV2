@@ -177,7 +177,10 @@ export const saveRun = (payload: {
 }) => invoke<number>('save_run', { payload });
 
 // Ropers
-export const listRopers = () => invoke<any[]>('list_ropers');
+export const listRopers = (options?: { includeInactive?: boolean }) => {
+  const payload = options?.includeInactive ? { include_inactive: true } : {};
+  return invoke<any[]>('list_ropers', payload);
+};
 
 export const createRoper = (payload: {
   first_name: string; last_name: string;
@@ -196,6 +199,52 @@ export const deleteRoper = (id: number) =>
 
 export const deleteAllRopers = () =>
   invoke<number>('delete_all_ropers');
+
+// Event Roster
+export type EventRosterSyncEntry = {
+  external_id?: string | null;
+  first_name: string;
+  last_name: string;
+  specialty?: 'header'|'heeler'|'both';
+  rating?: number;
+  phone?: string | null;
+  normalized_phone?: string | null;
+  email?: string | null;
+  level?: 'pro'|'amateur'|'principiante';
+  status?: 'registered'|'confirmed'|'withdrawn';
+  rating_override?: number | null;
+  notes?: string | null;
+  source_hash?: string | null;
+};
+
+export type SyncEventRosterResult = {
+  created_ropers: number;
+  updated_ropers: number;
+  reactivated_ropers: number;
+  roster_upserts: number;
+  roster_marked_withdrawn: number;
+};
+
+export const listEventRoster = (eventId: number, options?: { includeWithdrawn?: boolean }) =>
+  invoke<any[]>('list_event_roster', {
+    eventId,
+    event_id: eventId,
+    includeWithdrawn: options?.includeWithdrawn ?? false,
+    include_withdrawn: options?.includeWithdrawn ?? false,
+  });
+
+export const updateEventRosterEntry = (payload: {
+  id: number;
+  status?: 'registered'|'confirmed'|'withdrawn';
+  rating_override?: number | null;
+  notes?: string | null;
+}) => invoke<void>('update_event_roster_entry', { payload });
+
+export const syncEventRoster = (payload: {
+  event_id: number;
+  entries: EventRosterSyncEntry[];
+  withdraw_absent?: boolean;
+}) => invoke<SyncEventRosterResult>('sync_event_roster', { payload });
 
 // Payoffs
 export const listPayoffRules = (eventId?: number) => {

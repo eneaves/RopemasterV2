@@ -49,6 +49,7 @@ El esquema se define en `src-tauri/migrations/`.
 *   **`roper`**: Competidores (Headers/Heelers).
     *   Niveles: `pro`, `amateur`, `principiante`.
 *   **`team`**: Parejas de ropers para un evento.
+*   **`event_roster`**: Inscripciones individuales por evento (estado `registered|confirmed|withdrawn`, rating override, notas).
 *   **`draw`**: Asignación de equipos a posiciones en rondas.
 *   **`run`**: Ejecución de una ronda por un equipo (tiempos, penalizaciones).
 *   **`payoff_rule` / `payoff`**: Reglas y distribución de premios.
@@ -66,7 +67,7 @@ Definidos en `src-tauri/src/lib.rs`.
 | | `duplicate_event`, `lock_event`, `update_event_status` | Acciones específicas. |
 | **Equipos** | `list_teams`, `create_team`, `update_team`, `delete_team` | Gestión de equipos. |
 | | `hard_delete_teams_for_event` | Limpieza masiva. |
-| **Ropers** | `list_ropers`, `create_roper`, `update_roper`, `delete_roper` | Gestión de competidores. |
+| **Ropers** | `list_ropers`, `create_roper`, `update_roper`, `delete_roper`, `list_event_roster`, `update_event_roster_entry`, `sync_event_roster` | Directorio global + roster por evento. |
 | **Captura** | `save_run`, `get_runs` | Registro de tiempos y resultados. |
 | | `generate_draw`, `get_draw` | Generación de orden de salida. |
 | **Resultados**| `get_standings` | Cálculo de posiciones y promedios. |
@@ -96,7 +97,7 @@ Este archivo actúa como puente. Cada función exportada llama a `invoke('comman
 
 ### Flujo de Competencia
 1.  **Creación:** Usuario crea una **Serie** y luego un **Evento** dentro de ella.
-2.  **Inscripción:** En la vista **Equipos**, se seleccionan **Ropers** (Header/Heeler) para crear **Teams**.
+2.  **Inscripción:** Primero se sincroniza el **Roster del Evento** (importación Excel o búsqueda en el directorio global). En la vista **Equipos**, sólo se pueden elegir **Ropers** activos en ese roster para crear **Teams**.
 3.  **Sorteo (Draw):** Se ejecuta `generate_draw` para asignar el orden de salida.
 4.  **Captura:** En **Captura**, el operador ingresa tiempos (`save_run`) para cada equipo/ronda.
 5.  **Resultados:** El sistema calcula `get_standings` en tiempo real basado en los `run` completados.

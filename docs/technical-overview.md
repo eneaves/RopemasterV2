@@ -28,7 +28,7 @@ This document captures the current functionality, technology stack, and backend 
 - **Series event browser.** `EventsView` combines search, status filters, card/table toggles, and modals for new/edit/delete actions while enforcing admin PIN gates. It loads only events that belong to the selected series and wires duplication, export, draw, capture, standings, and payoff actions. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/EventsView.tsx:23-200`.
 - **Series insights.** `SeriesOverviewCard` and `InsightsPanel` give aggregated counts, pot projections, and activity feed for the open series, helping producers prioritize. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/SeriesOverviewCard.tsx:1-60`, `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/InsightsPanel.tsx:1-120`.
 - **Event workspace layout.** `EventDetails` presents breadcrumb navigation, an `EventMetricsCard`, and tabbed tooling for teams, draw, capture, standings, payoffs, and exports. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/EventDetails.tsx:1-160`.
-  - **Teams Tab.** Dragnet for roster health, filtering, sorting, and creation flows (manual or auto-balanced pairing) while honoring rating caps and lock status. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/TeamsTab.tsx:1-210` integrates `useTeams`/`useRopers` plus hard-delete + rebuild routines.
+  - **Teams Tab.** Dragnet para salud del roster, importación Excel y modal de edición (estatus/notas) además de filtros, ordenamiento y creación (manual o auto-balanced) respetando límites de rating y estado lock. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/TeamsTab.tsx` integra `useTeams`, `useRopers` y `useEventRoster` más rutinas de hard-delete + rebuild.
   - **Draw Tab.** Generates entire rounds or individual rounds with shuffling, reseeding, and validation checks via `generate_draw` and `generate_draw_batch`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/DrawTab.tsx:1-150`.
   - **Capture Tab.** `CaptureRunsTab` embeds a chronometer, keyboard shortcuts, manual override mode, PIN-protected overwrites, and auto-locking of events after the first saved run (`update_event_status`). `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/CaptureRunsTab.tsx:59-520`.
   - **Standings Tab.** Real-time aggregation with filters, podium cards, and Excel export hook (`export_event_to_excel`). `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src/components/StandingsTab.tsx:1-200`.
@@ -55,7 +55,7 @@ The Tauri backend exposes every functional area through dedicated commands regis
 | Series | `list_series`, `create_series`, `update_series`, `delete_series` (with cascade safeguards). |
 | Events | `list_events`, `list_all_events_raw`, `create_event`, `update_event`, `update_event_status`, `duplicate_event`, `delete_event`, `lock_event`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:128-158` |
 | Teams | `list_teams`, `create_team`, `update_team`, `delete_team`, `hard_delete_teams_for_event` enforce uniqueness and lock rules. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:172-190` |
-| Ropers | `list_ropers`, `create_roper`, `update_roper`, `delete_roper`, `delete_all_ropers`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:193-207` |
+| Ropers/Roster | `list_ropers`, `create_roper`, `update_roper`, `delete_roper`, `delete_all_ropers`, `list_event_roster`, `update_event_roster_entry`, `sync_event_roster`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:193-207` |
 | Draw & Runs | `generate_draw`, `generate_draw_batch`, `get_draw`, `save_run`, `get_runs`, `get_runs_expanded` maintain run-order integrity before capture. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:160-220` |
 | Standings & Analytics | `get_standings`, `get_dashboard_stats`, `get_series_logs`, `get_recent_activity`. `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:210-233` |
 | Payoffs | `list_payoff_rules`, `create_payoff_rule`, `delete_payoff_rule`, `get_payout_breakdown` (see struct implementations at `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/src/lib.rs:583-750`). |
@@ -67,7 +67,7 @@ The Tauri backend exposes every functional area through dedicated commands regis
 
 ## 6. Data Model Snapshot
 Based on migrations summarized in `/Users/emilianoneaves/Documents/RMT/roping-manager-tauri/src-tauri/BACKEND_DOCUMENTATION.md:60-90`:
-- **Core tables:** `series`, `event`, `team`, `roper`, `run`, `draw`, `payoff_rule`, `payoff`, `audit_log`.
+- **Core tables:** `series`, `event`, `event_roster`, `team`, `roper`, `run`, `draw`, `payoff_rule`, `payoff`, `audit_log`.
 - **Security scaffolding:** `app_user`, `role`, `user_role`, and `license_info` exist for future auth/licensing, yet no frontend flows consume them today.
 - **Integrity rules:** Rounded counts, status enums, and triggers ensure rating caps and permissible values (`status`, `rounds`, `level`).
 
@@ -88,4 +88,3 @@ Borrowing from the backend TODOs `/Users/emilianoneaves/Documents/RMT/roping-man
 3. **Integration tests.** Add Rust integration specs for `create_team`, `generate_draw`, `save_run`, and `get_standings`, plus Vitest suites for hooks.
 4. **Type sharing.** Generate a shared TypeScript schema (e.g., via `ts-rs`) so frontend payload types stay in sync with backend structs.
 5. **Licensing hooks.** If device licensing is required, wire `license_info` validations into app startup and expose user feedback in Settings.
-
