@@ -20,6 +20,15 @@ const CALENDAR_VIEWS: { value: View; label: string }[] = [
   { value: 'day', label: 'Día' },
 ]
 
+function statusLabel(status?: string | null) {
+  const value = String(status ?? '').toLowerCase()
+  if (value === 'active') return 'Activo'
+  if (value === 'locked') return 'Bloqueado'
+  if (value === 'completed' || value === 'finalized') return 'Finalizado'
+  if (value === 'draft' || value === 'upcoming') return 'Borrador'
+  return status ?? ''
+}
+
 type CalendarWrapperProps = {
   events: any[]
   date: Date
@@ -83,7 +92,7 @@ function CalendarWrapper({ events, date, view, onNavigate, onView }: CalendarWra
       views={CALENDAR_VIEWS.map((option) => option.value)}
       style={{ height: '100%' }}
       eventPropGetter={eventStyleGetter}
-      onSelectEvent={(e: any) => toast.info(`${e.title} — ${moment(e.start).format('LL')} (${e.status})`)}
+      onSelectEvent={(e: any) => toast.info(`${e.title} — ${moment(e.start).format('LL')} (${statusLabel(e.status)})`)}
     />
   )
 }
@@ -334,9 +343,9 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
 
           <div className="mt-6 flex justify-center gap-6">
             <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-green-500" /> <span className="text-sm text-muted-foreground">Activo</span></div>
-            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-orange-500" /> <span className="text-sm text-muted-foreground">Locked</span></div>
-            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-blue-500" /> <span className="text-sm text-muted-foreground">Finalized</span></div>
-            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-slate-400" /> <span className="text-sm text-muted-foreground">Draft</span></div>
+            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-orange-500" /> <span className="text-sm text-muted-foreground">Bloqueado</span></div>
+            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-blue-500" /> <span className="text-sm text-muted-foreground">Finalizado</span></div>
+            <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-slate-400" /> <span className="text-sm text-muted-foreground">Borrador</span></div>
           </div>
 
           {/* Próximos eventos: lista simple debajo del calendario para acceso rápido */}
@@ -356,7 +365,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
                 }
 
                 return upcoming.map((ev) => (
-                  <button key={ev.id} onClick={() => toast(`${ev.name} — ${moment(ev.parsedDate).format('LL')} (${ev.status})`)} className="w-full text-left rounded-md hover:bg-accent/50 p-3 border border-border bg-card flex items-center justify-between">
+                  <button key={ev.id} onClick={() => toast(`${ev.name} — ${moment(ev.parsedDate).format('LL')} (${statusLabel(ev.status)})`)} className="w-full text-left rounded-md hover:bg-accent/50 p-3 border border-border bg-card flex items-center justify-between">
                     <div>
                       <div className="font-medium">{ev.name}</div>
                       <div className="text-xs text-muted-foreground">{moment(ev.parsedDate).format('LL')}</div>
@@ -373,7 +382,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
                             : 'bg-slate-400 text-white'
                         }`}
                       >
-                        {ev.status}
+                        {statusLabel(ev.status)}
                       </span>
                     </div>
                   </button>
@@ -408,7 +417,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
             <div className="flex items-center gap-3">
               <span className="h-3 w-3 rounded-full bg-orange-500" />
               <div>
-                <div className="text-sm">Locked</div>
+                <div className="text-sm">Bloqueados</div>
                 <div className="text-xs text-muted-foreground">{locked}</div>
               </div>
             </div>
@@ -428,7 +437,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
             <div className="flex items-center gap-3">
               <span className="h-3 w-3 rounded-full bg-slate-400" />
               <div>
-                <div className="text-sm">Draft</div>
+                <div className="text-sm">Borradores</div>
                 <div className="text-xs text-muted-foreground">{draft}</div>
               </div>
             </div>
@@ -441,7 +450,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
           <div className="text-xs text-muted-foreground">Activos <span className="float-right">{pct(active)}%</span></div>
           <Progress value={pct(active)} className="mt-2 mb-3" />
 
-          <div className="text-xs text-muted-foreground">Locked <span className="float-right">{pct(locked)}%</span></div>
+          <div className="text-xs text-muted-foreground">Bloqueados <span className="float-right">{pct(locked)}%</span></div>
           <Progress value={pct(locked)} className="mt-2 mb-3" />
 
           <div className="text-xs text-muted-foreground">Finalizados <span className="float-right">{pct(completed)}%</span></div>

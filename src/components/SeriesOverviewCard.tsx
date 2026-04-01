@@ -17,20 +17,20 @@ export function SeriesOverviewCard({ series, events }: SeriesOverviewCardProps) 
     : 0
   const lastUpdated = events.length > 0
     ? new Date(Math.max(...events.map((e: any) => new Date(e.date).getTime()))).toLocaleDateString('es-ES', { year: 'numeric', month: 'short', day: 'numeric' })
-    : 'N/A'
+    : 'N/D'
 
   const metrics = [
-    { label: 'Total Events', value: totalEvents, icon: Trophy, color: 'text-primary bg-accent' },
-    { label: 'Total Ropers', value: totalRopers, icon: Users, color: 'text-foreground/80 bg-muted' },
-    { label: 'Teams Created', value: totalTeams, icon: Target, color: 'text-foreground/80 bg-muted' },
-    { label: 'Total Pot', value: `$${totalPot.toLocaleString()}`, icon: DollarSign, color: 'text-foreground/80 bg-muted' },
-    { label: 'Average Spacing', value: `${averageSpacing}%`, icon: Percent, color: 'text-foreground/80 bg-muted' },
-    { label: 'Last Updated', value: lastUpdated, icon: Calendar, color: 'text-foreground/80 bg-muted' },
+    { label: 'Eventos totales', value: totalEvents, icon: Trophy, color: 'text-primary bg-accent' },
+    { label: 'Ropers totales', value: totalRopers, icon: Users, color: 'text-foreground/80 bg-muted' },
+    { label: 'Equipos creados', value: totalTeams, icon: Target, color: 'text-foreground/80 bg-muted' },
+    { label: 'Bolsa total', value: `$${totalPot.toLocaleString()}`, icon: DollarSign, color: 'text-foreground/80 bg-muted' },
+    { label: 'Espaciado promedio', value: `${averageSpacing}%`, icon: Percent, color: 'text-foreground/80 bg-muted' },
+    { label: 'Última actualización', value: lastUpdated, icon: Calendar, color: 'text-foreground/80 bg-muted' },
   ]
 
   return (
     <Card className="mb-6">
-      <h3 className="text-foreground mb-6">Series Overview</h3>
+      <h3 className="text-foreground mb-6">Resumen de la serie</h3>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {metrics.map((metric, index) => {

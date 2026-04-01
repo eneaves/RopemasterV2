@@ -33,6 +33,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./ui/alert-dialog"
+import { Progress } from './ui/progress'
 
 import type { Event, Team as TeamType, Run as RunType } from '../types'
 
@@ -58,13 +59,75 @@ interface GlobalStanding {
   roundsCompleted: number
   totalTime: number | null
   average: number | null
-  status: 'qualified' | 'warning' | 'eliminated'
+  eliminatedRound: number | null
+  eliminationReason: 'nt' | 'dq' | null
+}
+
+type CumulativeEntry =
+  | { state: 'time'; total: number }
+  | { state: 'nt'; total: null }
+  | { state: 'dq'; total: null }
+
+type CumulativeTotalsMap = Record<number, CumulativeEntry>
+
+const mapRunRow = (r: any): RunType => ({
+  id: String(r.id),
+  teamId: r.team_id,
+  team: {
+    id: r.team_id,
+    header: r.header_name,
+    heeler: r.heeler_name,
+  },
+  round: r.round,
+  position: r.position,
+  time: r.time_sec,
+  penalty: r.penalty,
+  noTime: !!r.no_time,
+  dq: !!r.dq,
+  status: r.status === 'completed' ? 'completed' : r.status === 'skipped' ? 'skipped' : 'pending',
+})
+
+const buildRunsList = (rows: any[]): RunType[] =>
+  rows
+    .filter((row: any) => row.status !== 'skipped')
+    .map(mapRunRow)
+
+const calculateCumulativeTotals = (runsList: RunType[], roundLimit: number): CumulativeTotalsMap => {
+  const totals: CumulativeTotalsMap = {}
+
+  runsList.forEach((run) => {
+    if (run.round > roundLimit) return
+    const existing = totals[run.teamId]
+
+    if (run.dq) {
+      totals[run.teamId] = { state: 'dq', total: null }
+      return
+    }
+
+    if (run.noTime) {
+      if (existing?.state === 'dq') return
+      totals[run.teamId] = { state: 'nt', total: null }
+      return
+    }
+
+    if (run.status !== 'completed' || run.time === null) return
+    if (existing?.state === 'dq' || existing?.state === 'nt') return
+
+    const previousTotal = existing?.state === 'time' ? existing.total : 0
+    totals[run.teamId] = {
+      state: 'time',
+      total: previousTotal + run.time + run.penalty,
+    }
+  })
+
+  return totals
 }
 
 export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps) {
   const [selectedRound, setSelectedRound] = useState('1')
   const [runs, setRuns] = useState<RunType[]>([])
   const [selectedTeamIndex, setSelectedTeamIndex] = useState<number | null>(null)
+  const [allRuns, setAllRuns] = useState<RunType[]>([])
   const [timerRunning, setTimerRunning] = useState(false)
   const [timerValue, setTimerValue] = useState(0)
   const [penalty, setPenalty] = useState('0')
@@ -76,6 +139,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
   const [inputPin, setInputPin] = useState('')
   const [pinError, setPinError] = useState(false)
+  const [cumulativeTotals, setCumulativeTotals] = useState<CumulativeTotalsMap>({})
   
   // External Timer (Polaris) State
   const [captureMode, setCaptureMode] = useState<'manual' | 'external'>('manual')
@@ -90,30 +154,23 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const fetchRuns = useCallback(async () => {
     if (!event?.id) return
     try {
-      const data = await getRunsExpanded(Number(event.id), Number(selectedRound))
-      
-      const filtered = data.filter((r: any) => r.status !== 'skipped');
+      const roundNumber = Number(selectedRound)
+      const [currentRoundData, allRoundsData] = await Promise.all([
+        getRunsExpanded(Number(event.id), roundNumber),
+        getRunsExpanded(Number(event.id)),
+      ])
 
-      const mapped: RunType[] = filtered.map((r: any) => ({
-        id: String(r.id),
-        teamId: r.team_id,
-        team: {
-          id: r.team_id,
-          header: r.header_name,
-          heeler: r.heeler_name,
-        },
-        round: r.round,
-        position: r.position,
-        time: r.time_sec,
-        penalty: r.penalty,
-        noTime: !!r.no_time,
-        dq: !!r.dq,
-        status: r.status === 'completed' ? 'completed' : 'pending',
-      }))
-      setRuns(mapped)
+      const mappedCurrent = buildRunsList(currentRoundData)
+      const mappedAll = buildRunsList(allRoundsData)
+
+      setRuns(mappedCurrent)
+      setAllRuns(mappedAll)
+      setCumulativeTotals(calculateCumulativeTotals(mappedAll, roundNumber))
     } catch (error) {
       console.error('Error fetching runs:', error)
       toast.error('Error al cargar los runs')
+      setCumulativeTotals({})
+      setAllRuns([])
     }
   }, [event?.id, selectedRound])
 
@@ -121,44 +178,47 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     if (!event?.id) return
     try {
       const data = await getStandings(Number(event.id))
-      // Need to fetch team names for standings as getStandings returns team_id
-      // For now, we can try to map from existing runs if we have them, or we might need to fetch teams.
-      // Actually getStandings returns team_id. We can use the runs we have to find team names, 
-      // or better, update getStandings to return names. 
-      // For this iteration, let's assume we can find names from the runs list if loaded, 
-      // or we might show ID if not found. 
-      // A better approach: fetch teams list once or update getStandings.
-      // Let's use a simple lookup from the current runs for now.
-      
+
+      const eliminationMap = new Map<number, { round: number; reason: 'nt' | 'dq' }>()
+      allRuns.forEach((run) => {
+        if ((run.noTime || run.dq) && !eliminationMap.has(run.teamId)) {
+          eliminationMap.set(run.teamId, {
+            round: run.round,
+            reason: run.dq ? 'dq' : 'nt',
+          })
+        }
+      })
+
       const mapped: GlobalStanding[] = data.map((s: any) => {
-        // Try to find team name from current runs
-        const foundRun = runs.find(r => r.teamId === s.team_id)
-        const teamName = foundRun ? foundRun.team : { id: s.team_id, header: 'Unknown', heeler: 'Unknown' }
-        
+        const elimination = eliminationMap.get(s.team_id)
         return {
           position: s.rank,
-          team: teamName,
+          team: {
+            id: s.team_id,
+            header: s.header_name,
+            heeler: s.heeler_name,
+          },
           roundsCompleted: s.completed_runs,
           totalTime: s.total_time,
           average: s.avg_time,
-          status: 'qualified' // Placeholder logic
+          eliminatedRound: elimination ? elimination.round : null,
+          eliminationReason: elimination ? elimination.reason : null,
         }
       })
       setGlobalStandings(mapped)
     } catch (error) {
       console.error('Error fetching standings:', error)
     }
-  }, [event?.id, runs])
+  }, [event?.id, allRuns])
 
   useEffect(() => {
     fetchRuns()
   }, [fetchRuns])
 
   useEffect(() => {
-    if (runs.length > 0) {
-        fetchStandingsData()
-    }
-  }, [runs, fetchStandingsData])
+    if (!event?.id) return
+    fetchStandingsData()
+  }, [event?.id, allRuns, fetchStandingsData])
 
 
   // Timer (Manual Mode)
@@ -334,7 +394,8 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const handleSaveRun = async () => {
     if (!currentRun || !event?.id) return
 
-    if (currentRun.status === 'completed') {
+    const requiresAdminPin = currentRun.status === 'completed' || currentRun.noTime || currentRun.dq
+    if (requiresAdminPin) {
       setInputPin('')
       setPinError(false)
       setIsConfirmOpen(true)
@@ -519,6 +580,15 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
 
   // removed handleRecaptureConfirm
 
+  const maxRoundsCompleted = globalStandings.reduce((max, standing) => {
+    return Math.max(max, standing.roundsCompleted || 0)
+  }, 0)
+  const standingsComplete = totalRounds > 0 && maxRoundsCompleted >= totalRounds
+  const standingsProgress = totalRounds > 0 ? Math.min((maxRoundsCompleted / totalRounds) * 100, 100) : 0
+  const nextRoundPointer = standingsComplete
+    ? totalRounds
+    : Math.max(1, Math.min(maxRoundsCompleted + 1, totalRounds))
+
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header - Minimalist, inside content area (since we are in a tab) */}
@@ -597,7 +667,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
              
              {isLocked && (
                 <Badge className="bg-accent text-primary border-accent animate-in fade-in">
-                    <Lock className="mr-1 h-3 w-3" /> Locked
+                    <Lock className="mr-1 h-3 w-3" /> Bloqueado
                 </Badge>
              )}
         </div>
@@ -688,74 +758,99 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                   <TableRow className="hover:bg-card border-b border-border">
                   <TableHead className="text-foreground w-12 font-medium">#</TableHead>
                   <TableHead className="text-foreground font-medium">Equipo</TableHead>
+                  <TableHead className="text-foreground w-24 text-right font-medium">Acum.</TableHead>
                   <TableHead className="text-foreground w-16 text-center font-medium">Est.</TableHead>
                   <TableHead className="text-foreground w-20 text-right font-medium">Acción</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {runs.map((run, index) => (
-                  <TableRow
-                    key={run.id}
-                    className={`cursor-pointer transition-colors ${
-                      index === selectedTeamIndex ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-muted/50'
-                    }`}
-                    onClick={() => handleSelectTeam(index)}
-                  >
-                    <TableCell className="font-medium text-foreground/80">{run.position}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-col">
-                        <span className="text-foreground font-medium leading-none">{run.team.header}</span>
-                        <span className="text-muted-foreground text-xs mt-1">{run.team.heeler}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-center p-0">
-                      {run.status === 'completed' ? (
-                        <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-600">
-                            <CheckCircle2 className="w-4 h-4" />
+                {runs.map((run, index) => {
+                  const cumulative = cumulativeTotals[run.teamId]
+                  return (
+                    <TableRow
+                      key={run.id}
+                      className={`cursor-pointer transition-colors ${
+                        index === selectedTeamIndex ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-muted/50'
+                      }`}
+                      onClick={() => handleSelectTeam(index)}
+                    >
+                      <TableCell className="font-medium text-foreground/80">{run.position}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-col">
+                          <span className="text-foreground font-medium leading-none">{run.team.header}</span>
+                          <span className="text-muted-foreground text-xs mt-1">{run.team.heeler}</span>
                         </div>
-                      ) : run.status === 'skipped' ? (
-                         <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-muted text-muted-foreground">
-                            •
-                        </div>
-                      ) : (
-                         <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-50 text-blue-500">
-                            <div className="w-2 h-2 bg-current rounded-full" />
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {run.status === 'completed' ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleRecaptureClick(index)
-                          }}
-                          className="h-7 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50 text-xs"
-                        >
-                          Editar
-                        </Button>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant={index === selectedTeamIndex ? 'default' : 'secondary'}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleSelectTeam(index)
-                          }}
-                          className={`h-7 px-3 text-xs ${
-                            index === selectedTeamIndex 
-                                ? 'bg-primary text-primary-foreground shadow-sm' 
-                                : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
-                          }`}
-                        >
-                          Capturar
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell className="text-right align-middle">
+                        {!cumulative ? (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        ) : cumulative.state === 'time' ? (
+                          <div className="flex flex-col items-end leading-tight">
+                            <span className="font-mono text-sm font-semibold text-foreground">{cumulative.total.toFixed(2)}s</span>
+                            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Acum.</span>
+                          </div>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            className={`px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${
+                              cumulative.state === 'dq'
+                                ? 'bg-red-50 text-red-700 border-red-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
+                            }`}
+                          >
+                            {cumulative.state.toUpperCase()}
+                          </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-center p-0">
+                        {run.status === 'completed' ? (
+                          <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-600">
+                              <CheckCircle2 className="w-4 h-4" />
+                          </div>
+                        ) : run.status === 'skipped' ? (
+                           <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-muted text-muted-foreground">
+                              •
+                          </div>
+                        ) : (
+                           <div className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-50 text-blue-500">
+                              <div className="w-2 h-2 bg-current rounded-full" />
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {run.status === 'completed' ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleRecaptureClick(index)
+                            }}
+                            className="h-7 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50 text-xs"
+                          >
+                            Editar
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant={index === selectedTeamIndex ? 'default' : 'secondary'}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleSelectTeam(index)
+                            }}
+                            className={`h-7 px-3 text-xs ${
+                              index === selectedTeamIndex 
+                                  ? 'bg-primary text-primary-foreground shadow-sm' 
+                                  : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+                            }`}
+                          >
+                            Capturar
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </div>
@@ -850,7 +945,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                           <input
                             type="number"
                             step="0.001"
-                            value={manualTimeInput || (timerValue > 0 ? (timerValue / 1000).toFixed(3) : '')}
+                            value={manualTimeInput}
                             onChange={(e) => setManualTimeInput(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
@@ -1114,6 +1209,27 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
             </TabsContent>
 
             <TabsContent value="global" className="flex-1 overflow-auto p-0 m-0">
+              <div className="px-6 pt-6 pb-4 border-b border-border bg-muted/10">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Estado global</p>
+                    <div className="flex items-center gap-3 text-sm">
+                      <span className={`font-semibold ${standingsComplete ? 'text-emerald-600' : 'text-primary'}`}>
+                        {standingsComplete ? 'Completado' : 'En curso'}
+                      </span>
+                      <span className="text-muted-foreground">
+                        Ronda {nextRoundPointer} / {totalRounds}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-sm text-muted-foreground">
+                    {standingsComplete
+                      ? 'Todas las rondas han sido capturadas.'
+                      : 'Resultados se actualizan conforme se capturan nuevas rondas.'}
+                  </div>
+                </div>
+                <Progress value={standingsProgress} className="h-2 bg-muted" indicatorClassName="bg-emerald-500" />
+              </div>
                <Table>
                 <TableHeader className="sticky top-0 bg-card z-10 shadow-sm">
                   <TableRow className="hover:bg-card border-b border-border bg-muted/20">
@@ -1122,7 +1238,6 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                     <TableHead className="text-foreground text-center font-medium">Runs</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Total</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Promedio</TableHead>
-                    <TableHead className="text-foreground w-24 text-center font-medium">Estado</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1137,6 +1252,12 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                         <div className="flex flex-col">
                           <span className="font-medium text-foreground">{s.team.header}</span>
                           <span className="text-muted-foreground text-sm">{s.team.heeler}</span>
+                          {s.eliminatedRound ? (
+                            <span className="mt-1 text-[11px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 rounded-full px-2 py-0.5 w-fit">
+                              Eliminado R{s.eliminatedRound}
+                              {s.eliminationReason ? ` (${s.eliminationReason.toUpperCase()})` : ''}
+                            </span>
+                          ) : null}
                         </div>
                       </TableCell>
                       <TableCell className="text-center font-medium text-foreground/80">
@@ -1147,11 +1268,6 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                       </TableCell>
                       <TableCell className="text-right font-mono text-foreground/80">
                         {s.average !== null ? s.average.toFixed(2) + 's' : '—'}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        {s.status === 'qualified' && <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">En curso</Badge>}
-                        {s.status === 'warning' && <Badge className="bg-amber-50 text-amber-700 border-amber-200">Riesgo</Badge>}
-                        {s.status === 'eliminated' && <Badge className="bg-red-50 text-red-700 border-red-200">Eliminado</Badge>}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -1167,12 +1283,21 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
       <AlertDialog open={isConfirmOpen} onOpenChange={setIsConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>¿Sobrescribir resultado?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {noTime || dq 
+                ? `¿Marcar como ${noTime ? 'No Time' : 'Descalificado'}?`
+                : '¿Sobrescribir resultado?'
+              }
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Este equipo ya tiene un tiempo registrado. 
+              {noTime 
+                ? "Marcando este equipo como No Time. " 
+                : dq 
+                ? "Marcando este equipo como Descalificado. " 
+                : "Este equipo ya tiene un tiempo registrado. "}
               {event.adminPin 
-                ? " Ingresa el PIN de administrador para confirmar la sobrescritura." 
-                : " ¿Estás seguro de que deseas guardar este nuevo resultado y sobrescribir el anterior?"}
+                ? "Ingresa el PIN de administrador para confirmar." 
+                : "¿Estás seguro de que deseas continuar?"}
             </AlertDialogDescription>
           </AlertDialogHeader>
           

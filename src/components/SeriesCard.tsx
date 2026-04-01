@@ -24,11 +24,11 @@ export function SeriesCard({ series, onView, onEdit, onDuplicate, onDelete }: Pr
   const getStatusBadge = () => {
     switch (series.status) {
       case 'active':
-        return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-100">Active Series</Badge>
+        return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-100">Serie activa</Badge>
       case 'upcoming':
-        return <Badge className="bg-orange-50 text-orange-700 border-orange-100">Upcoming</Badge>
+        return <Badge className="bg-orange-50 text-orange-700 border-orange-100">Próxima</Badge>
       case 'archived':
-        return <Badge className="bg-gray-100 text-gray-600 border-gray-200">Archived</Badge>
+        return <Badge className="bg-gray-100 text-gray-600 border-gray-200">Archivada</Badge>
       default:
         return null
     }

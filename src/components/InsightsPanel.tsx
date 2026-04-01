@@ -100,7 +100,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
         color
     }
   }) : [
-    { id: '1', message: 'No activity yet', timestamp: '', icon: <Info className="size-4" />, color: 'text-foreground/80 bg-muted' }
+    { id: '1', message: 'Sin actividad aún', timestamp: '', icon: <Info className="size-4" />, color: 'text-foreground/80 bg-muted' }
   ]
 
   return (
@@ -110,23 +110,23 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
       {/* Total Events */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
-          <span className="text-foreground">Total Events</span>
+          <span className="text-foreground">Eventos totales</span>
           <Target className="size-5 text-primary" />
         </div>
         <p className="text-4xl text-foreground mb-2">{totalEvents}</p>
         <p className="text-muted-foreground">
-          {activeEvents} active • {lockedEvents} locked • {draftEvents} draft
+          {activeEvents} activos • {lockedEvents} bloqueados • {draftEvents} borradores
         </p>
       </div>
 
       {/* Breakdown */}
       <div className="mb-8">
-        <h4 className="text-foreground mb-4">Status Breakdown</h4>
+        <h4 className="text-foreground mb-4">Desglose por estado</h4>
 
         <div className="space-y-4">
           <div>
             <div className="flex justify-between mb-2">
-              <span className="text-muted-foreground">Active</span>
+              <span className="text-muted-foreground">Activos</span>
               <span className="text-foreground">{activeEvents}</span>
             </div>
             <Progress value={activePercentage} className="h-2 bg-gray-100" indicatorClassName="bg-emerald-500 rounded-full" />
@@ -134,7 +134,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
 
           <div>
             <div className="flex justify-between mb-2">
-              <span className="text-muted-foreground">Locked</span>
+              <span className="text-muted-foreground">Bloqueados</span>
               <span className="text-foreground">{lockedEvents}</span>
             </div>
             <Progress value={lockedPercentage} className="h-2 bg-gray-100" indicatorClassName="bg-[#FF7A00] rounded-full" />
@@ -142,7 +142,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
 
           <div>
             <div className="flex justify-between mb-2">
-              <span className="text-muted-foreground">Draft</span>
+              <span className="text-muted-foreground">Borradores</span>
               <span className="text-foreground">{draftEvents}</span>
             </div>
             <Progress value={draftPercentage} className="h-2 bg-gray-100" indicatorClassName="bg-gray-400 rounded-full" />
@@ -178,7 +178,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                 <p className="text-2xl text-foreground leading-none">{totalEvents}</p>
-                <p className="text-muted-foreground text-sm">events</p>
+                <p className="text-muted-foreground text-sm">eventos</p>
               </div>
             </div>
           </div>
@@ -187,7 +187,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
 
       {/* Activity */}
       <div className="mb-6">
-        <h4 className="text-foreground mb-4">Activity Feed</h4>
+        <h4 className="text-foreground mb-4">Actividad reciente</h4>
           <div className="space-y-3">
           {activities.map((a) => (
             <div key={a.id} className="flex items-start gap-3 pb-3 border-b border-border last:border-0 last:pb-0">
@@ -202,7 +202,7 @@ export function InsightsPanel({ events, seriesId }: InsightsPanelProps) {
 
         <Button variant="ghost" className="w-full mt-4 text-primary hover:bg-accent">
           <FileText className="mr-2 size-4" />
-          View Logs
+          Ver registros
         </Button>
       </div>
     </div>

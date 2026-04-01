@@ -3,13 +3,14 @@ use chrono::Utc;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use rust_xlsxwriter::*;
+use serde_json;
 use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     FromRow, Sqlite, SqlitePool, Transaction,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tauri::{Emitter, Manager, State};
 
@@ -77,6 +78,26 @@ async fn log_audit(
         tracing::error!("Failed to write audit log: {}", e);
     }
     Ok(())
+}
+
+async fn load_round_order(
+    pool: &SqlitePool,
+    event_id: i64,
+    round: i64,
+) -> Result<Vec<i64>, String> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT team_id
+        FROM draw
+        WHERE event_id = ?1 AND round = ?2
+        ORDER BY position ASC
+        "#,
+    )
+    .bind(event_id)
+    .bind(round)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /* ------------------- HEALTH ------------------- */
@@ -762,11 +783,27 @@ async fn create_payoff_rule(db: State<'_, Db>, rule: NewPayoffRule) -> Result<i6
     }
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize, Clone)]
+struct PayoffAllocationConfig {
+    deduction_pct: Option<f64>,
+}
+
+impl PayoffAllocationConfig {
+    fn parsed(raw: &Option<String>) -> Self {
+        if let Some(json) = raw {
+            serde_json::from_str::<PayoffAllocationConfig>(json).unwrap_or_default()
+        } else {
+            PayoffAllocationConfig::default()
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct PayoutBreakdown {
     total_pot: f64,
     deductions: f64,
     net_pot: f64,
+    deduction_pct: f64,
     payouts: Vec<PayoutAllocation>,
 }
 
@@ -821,8 +858,8 @@ async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<Payout
     let prize_pool = event.prize_pool.unwrap_or(0.0);
     let total_pot = (unique_ropers as f64 * entry_fee) + prize_pool;
 
-    // Deductions (Placeholder: 0% for now, or make it configurable later)
-    let deduction_pct = 0.0;
+    let config = PayoffAllocationConfig::parsed(&event.payoff_allocation);
+    let deduction_pct = config.deduction_pct.unwrap_or(0.0).clamp(0.0, 1.0);
     let deductions = total_pot * deduction_pct;
     let net_pot = total_pot - deductions;
 
@@ -849,6 +886,7 @@ async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<Payout
         total_pot,
         deductions,
         net_pot,
+        deduction_pct,
         payouts,
     })
 }
@@ -2430,66 +2468,94 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
         return Err("No hay equipos activos para generar el draw.".into());
     }
 
-    // 3) Special handling for final round: sort by accumulated time (highest to lowest)
-    if is_final_round {
-        // Get accumulated times for all qualifying teams (before the final round)
-        // We need to sort by total accumulated time in descending order (highest time goes first)
-        let team_times: Vec<(i64, Option<f64>)> = {
-            let mut result = Vec::new();
-            for &team_id in teams.iter() {
-                let total: Option<f64> = sqlx::query_scalar(
-                    r#"
-                    SELECT SUM(total_sec)
-                    FROM run
-                    WHERE event_id = ?1 
-                      AND team_id = ?2
-                      AND round < ?3
-                      AND status = 'completed'
-                      AND no_time = 0
-                      AND dq = 0
-                    "#,
-                )
-                .bind(opts.event_id)
-                .bind(team_id)
-                .bind(opts.round)
-                .fetch_one(&db.0)
-                .await
-                .map_err(|e| e.to_string())?;
-
-                result.push((team_id, total));
-            }
-            result
-        };
-
-        // Sort by accumulated time: highest first (DESC), teams without times go last
-        teams = {
-            let mut teams_with_times: Vec<_> = team_times
-                .iter()
-                .filter(|(_, time)| time.is_some())
-                .map(|(id, time)| (*id, time.unwrap()))
-                .collect();
-
-            // Sort by time descending (highest first)
-            teams_with_times
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut result: Vec<i64> = teams_with_times.iter().map(|(id, _)| *id).collect();
-
-            // Add teams without times at the end
-            let teams_without_times: Vec<i64> = team_times
-                .iter()
-                .filter(|(_, time)| time.is_none())
-                .map(|(id, _)| *id)
-                .collect();
-
-            result.extend(teams_without_times);
-            result
-        };
-    } else {
-        // 3) Normal rounds: reseed or keep order
-        let reseed = opts.reseed.unwrap_or(true);
-        if reseed {
+    if opts.round == 1 {
+        // First round: random draw once
+        if opts.reseed.unwrap_or(true) {
             teams.shuffle(&mut thread_rng());
+        }
+    } else if is_final_round {
+        // Final round: order by accumulated time (highest to lowest)
+        let base_order = load_round_order(&db.0, opts.event_id, 1).await?;
+        let base_rank: HashMap<i64, usize> = base_order
+            .into_iter()
+            .enumerate()
+            .map(|(idx, team_id)| (team_id, idx))
+            .collect();
+
+        let mut with_times: Vec<(i64, f64)> = Vec::new();
+        let mut without_times: Vec<i64> = Vec::new();
+
+        for &team_id in &teams {
+            let total: Option<f64> = sqlx::query_scalar(
+                r#"
+                SELECT SUM(total_sec)
+                FROM run
+                WHERE event_id = ?1 
+                  AND team_id = ?2
+                  AND round < ?3
+                  AND status = 'completed'
+                  AND no_time = 0
+                  AND dq = 0
+                "#,
+            )
+            .bind(opts.event_id)
+            .bind(team_id)
+            .bind(opts.round)
+            .fetch_one(&db.0)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            if let Some(value) = total {
+                with_times.push((team_id, value));
+            } else {
+                without_times.push(team_id);
+            }
+        }
+
+        with_times.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let a_rank = base_rank.get(&a.0).copied().unwrap_or(usize::MAX);
+                    let b_rank = base_rank.get(&b.0).copied().unwrap_or(usize::MAX);
+                    a_rank.cmp(&b_rank)
+                })
+        });
+
+        without_times.sort_by_key(|id| base_rank.get(&id).copied().unwrap_or(usize::MAX));
+
+        teams = with_times
+            .into_iter()
+            .map(|(id, _)| id)
+            .chain(without_times.into_iter())
+            .collect();
+    } else {
+        // Intermediate rounds: preserve the initial draw order while filtering NT/DQ
+        let base_order = load_round_order(&db.0, opts.event_id, 1).await?;
+        if base_order.is_empty() {
+            if opts.reseed.unwrap_or(true) {
+                teams.shuffle(&mut thread_rng());
+            }
+        } else {
+            let active_set: HashSet<i64> = teams.iter().copied().collect();
+            let mut seen: HashSet<i64> = HashSet::new();
+            let mut ordered: Vec<i64> = Vec::with_capacity(active_set.len());
+
+            for team_id in base_order.iter() {
+                if active_set.contains(team_id) && seen.insert(*team_id) {
+                    ordered.push(*team_id);
+                }
+            }
+
+            if ordered.len() < active_set.len() {
+                for team_id in teams.iter() {
+                    if seen.insert(*team_id) {
+                        ordered.push(*team_id);
+                    }
+                }
+            }
+
+            teams = ordered;
         }
     }
 
@@ -2577,7 +2643,7 @@ async fn generate_draw_batch(
     ensure_event_unlocked(&db.0, opts.event_id).await?;
 
     // Get active teams with composition for smart shuffling (filtering eliminated)
-    let mut teams: Vec<(i64, i64, i64)> = sqlx::query_as(
+    let teams: Vec<(i64, i64, i64)> = sqlx::query_as(
         r#"
         SELECT id, header_id, heeler_id FROM team 
         WHERE event_id = ?1 AND status = 'active'
@@ -2597,6 +2663,50 @@ async fn generate_draw_batch(
         return Err("No hay equipos activos para generar el draw.".into());
     }
 
+    let mut ordered_teams = teams.clone();
+    if opts.shuffle {
+        ordered_teams.shuffle(&mut thread_rng());
+
+        let mut pool = ordered_teams.clone();
+        let mut balanced: Vec<(i64, i64, i64)> = Vec::with_capacity(pool.len());
+
+        while !pool.is_empty() {
+            let mut best_idx = 0;
+            let mut best_score = -1;
+
+            for (i, candidate) in pool.iter().enumerate() {
+                let mut min_distance = 999;
+
+                for (distance, prev) in balanced.iter().rev().enumerate() {
+                    let dist = distance + 1;
+                    if prev.1 == candidate.1
+                        || prev.1 == candidate.2
+                        || prev.2 == candidate.1
+                        || prev.2 == candidate.2
+                    {
+                        min_distance = dist;
+                        break;
+                    }
+                }
+
+                let score = min_distance as i64;
+                if score > best_score {
+                    best_score = score;
+                    best_idx = i;
+                    if score > 20 {
+                        break;
+                    }
+                }
+            }
+
+            balanced.push(pool.remove(best_idx));
+        }
+
+        ordered_teams = balanced;
+    }
+
+    let frozen_sequence: Vec<i64> = ordered_teams.iter().map(|t| t.0).collect();
+
     let mut tx: Transaction<'_, Sqlite> = db.0.begin().await.map_err(|e| e.to_string())?;
 
     // For each round EXCEPT THE LAST ONE
@@ -2609,59 +2719,7 @@ async fn generate_draw_batch(
     };
 
     for r in 1..=rounds_to_generate {
-        // Shuffle if requested (with smart spacing logic)
-        if opts.shuffle {
-            // 1. Random shuffle first
-            teams.shuffle(&mut thread_rng());
-
-            // 2. Smart sort to avoid consecutive ropers with improved spacing
-            let mut ordered: Vec<(i64, i64, i64)> = Vec::with_capacity(teams.len());
-            let mut pool = teams.clone();
-
-            while !pool.is_empty() {
-                let mut best_idx = 0;
-                let mut best_score = -1;
-
-                // Scan all candidates in pool
-                for (i, candidate) in pool.iter().enumerate() {
-                    let mut min_distance = 999; // Large number
-
-                    // Check backwards in 'ordered' to find minimum distance to any conflict
-                    // We now check ALL previous entries, not just last 10
-                    for (distance, prev) in ordered.iter().rev().enumerate() {
-                        let dist = distance + 1;
-                        // Check if any roper matches
-                        if prev.1 == candidate.1
-                            || prev.1 == candidate.2
-                            || prev.2 == candidate.1
-                            || prev.2 == candidate.2
-                        {
-                            min_distance = dist;
-                            break; // Found closest conflict
-                        }
-                    }
-
-                    // Score is the minimum distance to any conflict
-                    // Higher is better. If no conflict found, min_distance stays at 999
-                    let score = min_distance as i64;
-
-                    if score > best_score {
-                        best_score = score;
-                        best_idx = i;
-                        // If we found a candidate with no conflict in recent history (>20 positions), take it
-                        if score > 20 {
-                            break;
-                        }
-                    }
-                }
-
-                ordered.push(pool.remove(best_idx));
-            }
-            teams = ordered;
-        }
-
-        for (idx, team_tuple) in teams.iter().enumerate() {
-            let team_id = team_tuple.0;
+        for (idx, team_id) in frozen_sequence.iter().enumerate() {
             let position = (idx as i64) + 1;
 
             // Insert into draw
@@ -2676,7 +2734,7 @@ async fn generate_draw_batch(
             .bind(opts.event_id)
             .bind(r)
             .bind(position)
-            .bind(team_id)
+            .bind(*team_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
@@ -2692,7 +2750,7 @@ async fn generate_draw_batch(
                 "#
             )
             .bind(opts.event_id)
-            .bind(team_id)
+            .bind(*team_id)
             .bind(r)
             .bind(position)
             .execute(&mut *tx)
@@ -3610,8 +3668,8 @@ mod tests {
     use license_core::{LicensePayload, DEFAULT_APP_ID, PAYLOAD_VERSION_CURRENT};
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::collections::BTreeMap;
-    use uuid::Uuid;
     use time::OffsetDateTime;
+    use uuid::Uuid;
 
     async fn setup_test_db() -> Db {
         let db_path = std::env::temp_dir().join(format!("roping-tests-{}.sqlite", Uuid::new_v4()));

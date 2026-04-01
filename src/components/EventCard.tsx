@@ -41,11 +41,11 @@ export function EventCard({
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'active':
-        return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-50">🟢 Active</Badge>
+        return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-50">🟢 Activo</Badge>
       case 'locked':
-        return <Badge className="bg-accent text-primary border-accent hover:bg-accent"><Lock className="mr-1 size-3" />Locked</Badge>
+        return <Badge className="bg-accent text-primary border-accent hover:bg-accent"><Lock className="mr-1 size-3" />Bloqueado</Badge>
       case 'draft':
-        return <Badge className="bg-muted text-muted-foreground border-border hover:bg-muted">⚪ Draft</Badge>
+        return <Badge className="bg-muted text-muted-foreground border-border hover:bg-muted">⚪ Borrador</Badge>
       default:
         return null
     }
@@ -92,7 +92,7 @@ export function EventCard({
       <div className="flex items-center gap-2 mb-4">
         {getStatusBadge(event.status)}
         {event.payoffStatus === 'finalized' && (
-          <Badge className="bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-50">🏁 Payoffs Done</Badge>
+          <Badge className="bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-50">🏁 Pagos finalizados</Badge>
         )}
       </div>
 
@@ -103,7 +103,7 @@ export function EventCard({
             <Users className="size-4 text-emerald-600" />
           </div>
           <div>
-            <p className="text-muted-foreground">Teams</p>
+            <p className="text-muted-foreground">Equipos</p>
             <p className="text-foreground">{event.teamsCount}</p>
           </div>
         </div>
@@ -113,7 +113,7 @@ export function EventCard({
             <Trophy className="size-4 text-blue-600" />
           </div>
           <div>
-            <p className="text-muted-foreground">Rounds</p>
+            <p className="text-muted-foreground">Rondas</p>
             <p className="text-foreground">{event.rounds}</p>
           </div>
         </div>
@@ -123,7 +123,7 @@ export function EventCard({
             <DollarSign className="size-4 text-violet-600" />
           </div>
           <div>
-            <p className="text-muted-foreground">Pot</p>
+            <p className="text-muted-foreground">Bolsa</p>
             <p className="text-foreground">${(event.pot || 0).toLocaleString()}</p>
           </div>
         </div>
@@ -132,7 +132,7 @@ export function EventCard({
       {/* Action */}
       <Button onClick={onViewTeams} className="w-full bg-primary text-primary-foreground rounded-xl hover:opacity-90 h-11">
         <Eye className="mr-2 size-4" />
-        Open Event
+        Abrir evento
       </Button>
     </div>
   )

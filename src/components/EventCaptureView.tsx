@@ -311,9 +311,9 @@ export function EventCaptureView({ event, series, onBack }: EventCaptureViewProp
 
   const getStatusBadge = () => {
     if (isLocked) {
-      return <Badge className="bg-accent text-primary border-accent"><Lock className="mr-1 h-3 w-3" /> Locked</Badge>
+      return <Badge className="bg-accent text-primary border-accent"><Lock className="mr-1 h-3 w-3" /> Bloqueado</Badge>
     }
-    return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">🟢 Active</Badge>
+    return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">🟢 Activo</Badge>
   }
 
   return (
@@ -622,7 +622,7 @@ export function EventCaptureView({ event, series, onBack }: EventCaptureViewProp
                 {isLocked && (
                   <Badge className="bg-accent text-primary border-accent">
                     <Lock className="h-3 w-3 mr-1" />
-                    Locked
+                    Bloqueado
                   </Badge>
                 )}
               </div>

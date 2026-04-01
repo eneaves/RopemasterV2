@@ -262,14 +262,38 @@ export function Dashboard() {
 
   // Si hay serie y evento seleccionados, mostramos EventDetails.
   // Nota: EventCaptureView sólo se abre desde EventDetails cuando el usuario lo solicita.
+  const normalizeEventRow = (row: any): Event => {
+    const normalizeStatus = (s: any) => {
+      const value = String(s ?? 'upcoming').toLowerCase()
+      if (value === 'finalized') return 'completed'
+      if (value === 'upcoming') return 'draft'
+      return value as Event['status']
+    }
+    return {
+      id: Number(row.id),
+      seriesId: Number(row.series_id ?? row.seriesId ?? 0),
+      name: row.name ?? '',
+      date: String(row.date ?? row.event_date ?? '').slice(0, 10),
+      status: normalizeStatus(row.status),
+      rounds: Number(row.rounds ?? 1),
+      teamsCount: Number(row.teams_count ?? 0),
+      entryFee: row.entry_fee ?? undefined,
+      maxTeamRating: row.max_team_rating ?? undefined,
+      pot: Number(row.pot ?? 0),
+      payoffAllocation: row.payoff_allocation ?? undefined,
+      location: row.location ?? undefined,
+      prizePool: row.prize_pool ?? undefined,
+      adminPin: row.admin_pin ?? undefined,
+    }
+  }
+
   if (selectedEvent && selectedSeries) {
     const handleEventUpdated = async () => {
-      // Refrescar el evento desde la API
       try {
         const events = await getEvents(selectedSeries.id)
-        const updatedEvent = events.find((e: any) => e.id === selectedEvent.id)
+        const updatedEvent = events.find((e: any) => Number(e.id) === Number(selectedEvent.id))
         if (updatedEvent) {
-          setSelectedEvent(updatedEvent)
+          setSelectedEvent(normalizeEventRow(updatedEvent))
         }
       } catch (e) {
         console.error('Error refreshing event:', e)

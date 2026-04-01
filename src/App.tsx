@@ -24,7 +24,7 @@ function AppShell() {
   return (
     <div className="h-screen w-screen flex bg-background text-foreground">
       <Sidebar />
-      <main className="flex-1 min-h-0 overflow-hidden">
+      <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
         <Outlet />
       </main>
       <Toaster richColors position="top-right" />

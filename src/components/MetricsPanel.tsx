@@ -36,7 +36,7 @@ export function MetricsPanel({ stats }: MetricsPanelProps) {
       <div className="space-y-4 mb-8">
         <Card className="p-4 bg-[#FFF4E6] border-orange-100">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-muted-foreground">Total Series</span>
+            <span className="text-muted-foreground">Series totales</span>
             <Trophy className="w-5 h-5 text-[#FF7A00]" />
           </div>
           <p className="text-2xl text-[#FF7A00]">{total_series}</p>
@@ -45,7 +45,7 @@ export function MetricsPanel({ stats }: MetricsPanelProps) {
 
         <Card className="p-4 bg-blue-50 border-blue-100">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-muted-foreground">Total Events</span>
+            <span className="text-muted-foreground">Eventos totales</span>
             <Target className="w-5 h-5 text-blue-600" />
           </div>
           <p className="text-2xl text-blue-600">{total_events}</p>
@@ -54,7 +54,7 @@ export function MetricsPanel({ stats }: MetricsPanelProps) {
 
         <Card className="p-4 bg-green-50 border-green-100">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-muted-foreground">Registered Teams</span>
+            <span className="text-muted-foreground">Equipos registrados</span>
             <Users className="w-5 h-5 text-green-600" />
           </div>
           <p className="text-2xl text-green-600">{total_teams}</p>
@@ -63,7 +63,7 @@ export function MetricsPanel({ stats }: MetricsPanelProps) {
 
         <Card className="p-4 bg-purple-50 border-purple-100">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-muted-foreground">Total Pot</span>
+            <span className="text-muted-foreground">Bolsa total</span>
             <DollarSign className="w-5 h-5 text-purple-600" />
           </div>
           <p className="text-2xl text-purple-600">
@@ -74,7 +74,7 @@ export function MetricsPanel({ stats }: MetricsPanelProps) {
 
         <Card className="p-4 bg-yellow-50 border-yellow-100">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-muted-foreground">Upcoming Events</span>
+            <span className="text-muted-foreground">Próximos eventos</span>
             <Calendar className="w-5 h-5 text-yellow-600" />
           </div>
           <p className="text-2xl text-yellow-600">{upcoming_events_30d}</p>

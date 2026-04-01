@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { DollarSign, Percent, RefreshCw, Wand2, Trash2 } from 'lucide-react'
 import { Button } from './ui/button'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from './ui/table'
@@ -23,7 +25,7 @@ import {
   AlertDialogTrigger,
 } from './ui/alert-dialog'
 import { toast } from 'sonner'
-import { listPayoffRules, createPayoffRule, deletePayoffRule, getPayoutBreakdown, getStandings } from '../lib/api'
+import { listPayoffRules, createPayoffRule, deletePayoffRule, getPayoutBreakdown, getStandings, updateEvent } from '../lib/api'
 
 interface PayoffsTabProps {
   event: any
@@ -41,6 +43,7 @@ interface PayoutBreakdown {
   total_pot: number
   deductions: number
   net_pot: number
+  deduction_pct: number
   payouts: Array<{ place: number; percentage: number; amount: number }>
 }
 
@@ -53,11 +56,27 @@ interface Standing {
   completedRuns: number
 }
 
+interface PayoffConfig {
+  deduction_pct?: number
+}
+
+const parsePayoffConfig = (raw?: string | null): PayoffConfig => {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') {
+      return parsed as PayoffConfig
+    }
+  } catch (err) {
+    console.warn('[PayoffsTab] invalid payoff allocation config', err)
+  }
+  return {}
+}
+
 const PRESETS = [
   { label: '1 Lugar (100%)', rules: [{ position: 1, percentage: 100 }] },
   { label: '2 Lugares (60/40)', rules: [{ position: 1, percentage: 60 }, { position: 2, percentage: 40 }] },
   { label: '3 Lugares (50/30/20)', rules: [{ position: 1, percentage: 50 }, { position: 2, percentage: 30 }, { position: 3, percentage: 20 }] },
-  { label: '4 Lugares (40/30/20/10)', rules: [{ position: 1, percentage: 40 }, { position: 2, percentage: 30 }, { position: 3, percentage: 20 }, { position: 4, percentage: 10 }] },
 ]
 
 export function PayoffsTab({ event }: PayoffsTabProps) {
@@ -66,6 +85,20 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
   const [standings, setStandings] = useState<Standing[]>([])
   const [selectedPreset, setSelectedPreset] = useState<string>('')
   const [loading, setLoading] = useState(false)
+  const [payoffConfig, setPayoffConfig] = useState<PayoffConfig>(() => parsePayoffConfig(event?.payoffAllocation))
+  const [deductionInput, setDeductionInput] = useState('0')
+  const [savingDeduction, setSavingDeduction] = useState(false)
+  const [topThreeInputs, setTopThreeInputs] = useState<string[]>(['50', '30', '20'])
+  const [savingTopThree, setSavingTopThree] = useState(false)
+
+  const normalizedDeductionPct = Math.max(0, Math.min(100, parseFloat(deductionInput) || 0))
+  const deductionAmountPreview = (breakdown?.total_pot ?? 0) * (normalizedDeductionPct / 100)
+
+  const persistPayoffConfig = async (next: PayoffConfig) => {
+    if (!event?.id) return
+    await updateEvent(Number(event.id), { payoff_allocation: JSON.stringify(next) })
+    setPayoffConfig(next)
+  }
 
   const fetchData = useCallback(async () => {
     if (!event?.id) return
@@ -91,6 +124,9 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
             ...p,
             percentage: p.percentage * 100
           }))
+          const pct = typeof breakdownData.deduction_pct === 'number' ? breakdownData.deduction_pct : 0
+          setDeductionInput(((pct * 100).toFixed(2)).replace(/\.00$/, '').replace(/\.0$/, '') || '0')
+          setPayoffConfig((prev) => ({ ...prev, deduction_pct: pct }))
         }
         setBreakdown(breakdownData)
 
@@ -122,9 +158,81 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
     }
   }, [event?.id])
 
+  const handleSaveDeduction = async () => {
+    if (!event?.id) return
+    setSavingDeduction(true)
+    try {
+      const nextConfig: PayoffConfig = {
+        ...payoffConfig,
+        deduction_pct: normalizedDeductionPct / 100,
+      }
+      await persistPayoffConfig(nextConfig)
+      toast.success('Deducción actualizada')
+      await fetchData()
+    } catch (error) {
+      console.error(error)
+      toast.error('No se pudo guardar la deducción')
+    } finally {
+      setSavingDeduction(false)
+    }
+  }
+
+  const handleApplyTopThree = async () => {
+    if (!event?.id) return
+    const values = topThreeInputs.map((val) => parseFloat(val))
+    if (values.some((val) => Number.isNaN(val) || val < 0)) {
+      toast.error('Ingresa porcentajes válidos para 1°, 2° y 3° lugar')
+      return
+    }
+    const total = values.reduce((acc, val) => acc + val, 0)
+    if (Math.abs(total - 100) > 0.5) {
+      toast.error('La suma de los porcentajes debe ser 100%')
+      return
+    }
+    setSavingTopThree(true)
+    try {
+      await Promise.all(rules.map((r) => deletePayoffRule(r.id)))
+      await Promise.all(
+        values.map((val, idx) => {
+          if (val <= 0) return Promise.resolve()
+          return createPayoffRule({
+            event_id: Number(event.id),
+            position: idx + 1,
+            percentage: val / 100,
+          })
+        })
+      )
+      toast.success('Distribución personalizada aplicada')
+      await fetchData()
+    } catch (error) {
+      console.error(error)
+      toast.error('Error al aplicar los porcentajes personalizados')
+    } finally {
+      setSavingTopThree(false)
+    }
+  }
+
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  useEffect(() => {
+    const parsed = parsePayoffConfig(event?.payoffAllocation)
+    setPayoffConfig(parsed)
+    if (typeof parsed.deduction_pct === 'number') {
+      const pct = parsed.deduction_pct * 100
+      setDeductionInput((pct.toFixed(2)).replace(/\.00$/, '').replace(/\.0$/, '') || '0')
+    }
+  }, [event?.payoffAllocation])
+
+  useEffect(() => {
+    if (rules.length === 0) return
+    const next = [1, 2, 3].map((position) => {
+      const rule = rules.find((r) => r.position === position)
+      return rule ? String(rule.percentage) : ''
+    })
+    setTopThreeInputs(next)
+  }, [rules])
 
   const executeApplyPreset = async () => {
     if (!selectedPreset) return
@@ -145,7 +253,7 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
       
       toast.success(`Preset aplicado: ${preset.label}`)
       setSelectedPreset('')
-      fetchData()
+      await fetchData()
     } catch (error) {
       console.error(error)
       toast.error('Error al aplicar preset')
@@ -157,7 +265,7 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
     try {
       await deletePayoffRule(id)
       toast.success('Regla eliminada')
-      fetchData()
+      await fetchData()
     } catch (error) {
       console.error(error)
       toast.error('Error al eliminar regla')
@@ -214,6 +322,43 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
         </div>
       </div>
 
+      <div className="bg-card border border-border rounded-xl p-4 shadow-sm">
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h3 className="text-sm font-medium text-foreground">Deducción del evento</h3>
+              <p className="text-xs text-muted-foreground">Se descuenta del pot antes de repartir.</p>
+            </div>
+            <Button onClick={handleSaveDeduction} disabled={savingDeduction || loading} className="bg-primary text-primary-foreground">
+              {savingDeduction ? 'Guardando...' : 'Guardar deducción'}
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="flex items-center gap-2">
+              <Label htmlFor="deduction-pct" className="text-xs uppercase tracking-wide text-muted-foreground">Porcentaje</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="deduction-pct"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.1"
+                  value={deductionInput}
+                  onChange={(e) => setDeductionInput(e.target.value)}
+                  className="w-24 text-right"
+                  disabled={savingDeduction || loading}
+                />
+                <span className="text-sm text-muted-foreground">%</span>
+              </div>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <p className="text-xs text-muted-foreground mb-1">Equivale a</p>
+              <p className="text-lg font-semibold text-foreground">{formatCurrency(deductionAmountPreview)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
         {/* Left: Rules Configuration (PRESETS ONLY) */}
         <div className="bg-card border border-border rounded-xl flex flex-col overflow-hidden shadow-sm">
@@ -262,6 +407,43 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
                     </AlertDialogFooter>
                     </AlertDialogContent>
                 </AlertDialog>
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">Personaliza los porcentajes para los primeros tres lugares.</p>
+                <div className="flex gap-3">
+                  {topThreeInputs.map((value, idx) => (
+                    <div key={idx} className="flex-1">
+                      <Label className="text-xs text-muted-foreground block mb-1">Lugar {idx + 1}</Label>
+                      <div className="flex items-center gap-1">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step="0.1"
+                          value={value}
+                          onChange={(e) => {
+                            const next = [...topThreeInputs]
+                            next[idx] = e.target.value
+                            setTopThreeInputs(next)
+                          }}
+                          className="text-right"
+                          disabled={savingTopThree || loading}
+                        />
+                        <span className="text-xs text-muted-foreground">%</span>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="flex items-end">
+                    <Button
+                      onClick={handleApplyTopThree}
+                      disabled={savingTopThree || loading}
+                      className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
+                    >
+                      {savingTopThree ? 'Aplicando...' : 'Aplicar'}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">La suma debe ser 100%.</p>
               </div>
           </div>
 

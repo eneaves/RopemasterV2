@@ -108,7 +108,7 @@ export function TeamsManagement() {
             <SelectTrigger className="bg-card border-border">
                 <SelectValue placeholder="Seleccionar Serie" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent side="bottom" sideOffset={8}>
                 <SelectItem value="all">Todas las series</SelectItem>
                 {seriesList.map(s => (
                     <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>
@@ -120,7 +120,7 @@ export function TeamsManagement() {
             <SelectTrigger className="bg-card border-border">
                 <SelectValue placeholder="Seleccionar Evento" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent side="bottom" sideOffset={8}>
                 {filteredEvents.map(e => (
                     <SelectItem key={e.id} value={String(e.id)}>{e.name}</SelectItem>
                 ))}

@@ -34,7 +34,7 @@ interface EventDetailsProps {
   // Permite controlar la pestaña inicial desde el llamador
   initialTab?: string
   // Callback para notificar cuando el evento debe actualizarse
-  onEventUpdated?: () => void
+  onEventUpdated?: () => void | Promise<void>
 }
 
 export function EventDetails({ event, series, onBack, onCreateEvent, initialTab, onEventUpdated }: EventDetailsProps) {
@@ -48,19 +48,19 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
 
   const getStatusBadge = () => {
     if (payoffsFinalized) {
-      return <Badge className="bg-violet-50 text-violet-700 border-violet-200">Payoffs Finalized</Badge>
+      return <Badge className="bg-violet-50 text-violet-700 border-violet-200">Pagos finalizados</Badge>
     }
     if (event?.status === 'draft') {
-      return <Badge className="bg-muted text-muted-foreground border-border hover:bg-muted">Draft</Badge>
+      return <Badge className="bg-muted text-muted-foreground border-border hover:bg-muted">Borrador</Badge>
     }
     if (isLocked || event?.status === 'locked') {
       return (
         <Badge className="bg-accent text-primary border-accent">
-          <Lock className="mr-1 h-3 w-3" /> Locked
+          <Lock className="mr-1 h-3 w-3" /> Bloqueado
         </Badge>
       )
     }
-    return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">Active</Badge>
+    return <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">Activo</Badge>
   }
 
   if (showCaptureView) {
@@ -221,6 +221,9 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
             await updateEvent(Number(id), patch)
             toast.success('Evento actualizado')
             if (patch.status) setIsLocked(patch.status === 'locked')
+            if (onEventUpdated) {
+              await onEventUpdated()
+            }
           } catch (err: any) {
             toast.error(err?.toString?.() ?? 'No se pudo actualizar el evento')
           } finally {

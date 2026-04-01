@@ -6,6 +6,7 @@ import { Label } from './ui/label'
 import { Switch } from './ui/switch'
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './ui/select'
 import type { Event as EventType } from '../types'
+import { toast } from 'sonner'
 
 export function NewEventModal({
   isOpen,
@@ -18,7 +19,7 @@ export function NewEventModal({
   isOpen: boolean
   onClose: () => void
   onCreateEvent?: (e: EventType) => void
-  onUpdateEvent?: (id: string, patch: any) => void
+  onUpdateEvent?: (id: string, patch: any) => void | Promise<void>
   initialEvent?: EventType | null
   seriesId: string | number
 }) {
@@ -137,18 +138,38 @@ export function NewEventModal({
       }
 
       if (isEditMode && initialEvent) {
-        // build patch
-        const patch: any = {
-          name: newEvent.name,
-          date: newEvent.date,
-          rounds: newEvent.rounds,
-          status: newEvent.status,
-          entry_fee: newEvent.entryFee ?? null,
-          max_team_rating: newEvent.maxTeamRating ?? null,
-          payoff_allocation: newEvent.payoffAllocation ?? null,
-          admin_pin: newEvent.adminPin ?? null,
+        const patch: Record<string, unknown> = {}
+        const assignIfChanged = (key: string, nextValue: unknown, prevValue: unknown) => {
+          const prev = prevValue ?? null
+          const next = nextValue ?? null
+          if (prev !== next) {
+            patch[key] = next
+          }
         }
-        onUpdateEvent?.(String(initialEvent.id), patch)
+
+        assignIfChanged('name', newEvent.name, initialEvent.name)
+        assignIfChanged('date', newEvent.date, initialEvent.date)
+        assignIfChanged('rounds', newEvent.rounds, initialEvent.rounds)
+        assignIfChanged('status', newEvent.status, initialEvent.status)
+
+        const normalizedEntryFee = entryFee.trim() === '' ? null : Number(entryFee)
+        assignIfChanged('entry_fee', normalizedEntryFee, initialEvent.entryFee ?? null)
+
+        const normalizedMaxRating =
+          isMaxRatingEnabled && maxTeamRating.trim() !== '' ? Number(maxTeamRating) : null
+        assignIfChanged('max_team_rating', normalizedMaxRating, initialEvent.maxTeamRating ?? null)
+
+        const normalizedPayoff = payoffAllocation.trim() === '' ? null : payoffAllocation.trim()
+        assignIfChanged('payoff_allocation', normalizedPayoff, initialEvent.payoffAllocation ?? null)
+
+        const normalizedAdminPin = adminPin.trim() === '' ? null : adminPin.trim()
+        assignIfChanged('admin_pin', normalizedAdminPin, initialEvent.adminPin ?? null)
+
+        if (Object.keys(patch).length > 0) {
+          await onUpdateEvent?.(String(initialEvent.id), patch)
+        } else {
+          toast.success('Sin cambios por guardar')
+        }
       } else {
         onCreateEvent?.(newEvent)
       }
@@ -279,4 +300,3 @@ export function NewEventModal({
     </Dialog>
   )
 }
-
