@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { listTeams, getEvents } from './api'
+import { listTeams, getEvents, generateLicenseRequest } from './api'
 import { invoke } from '@tauri-apps/api/core'
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -29,5 +29,25 @@ describe('api wrappers', () => {
     invokeMock.mockResolvedValueOnce([])
     await getEvents(7)
     expect(invokeMock).toHaveBeenCalledWith('list_events', { seriesId: 7 })
-})
+  })
+
+  it('generateLicenseRequest sends camelCase fields expected by the Tauri bridge', async () => {
+    invokeMock.mockResolvedValueOnce({
+      exported_path: '/tmp/request.req',
+      archived_path: '/tmp/archive.req',
+      archived_internally: true,
+      created_at: 0,
+      plan: 'monthly',
+      device_hash_hex: 'abcd',
+      request_id_hex: 'abcd1234',
+      installation_id: 'install-123',
+      nonce_hex: 'legacy',
+    })
+    await generateLicenseRequest('monthly', 'Cliente Demo', '/tmp/request.req')
+    expect(invokeMock).toHaveBeenCalledWith('generate_license_request', {
+      plan: 'monthly',
+      customerNameHint: 'Cliente Demo',
+      destinationPath: '/tmp/request.req',
+    })
+  })
 })

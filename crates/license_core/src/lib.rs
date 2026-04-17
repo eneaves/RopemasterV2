@@ -1,18 +1,27 @@
 pub mod crypto;
 pub mod format;
+#[deprecated(
+    note = "Use shared_core for modern request generation; this CBOR request module is legacy-only."
+)]
 pub mod request;
 pub mod validation;
 
 pub use ed25519_dalek::PublicKey;
 pub use format::{LicensePayload, ParsedLicense};
+#[allow(deprecated)]
 pub use request::{LicenseRequest, RequestError, RequestErrorKind, REQUEST_VER};
+#[allow(deprecated)]
+pub use request::{
+    LicenseRequestPayload, RequestAuth, RequestFingerprint, RequestFingerprintAnchors,
+    RequestFingerprintObservations, REQUEST_AUTH_VER,
+};
 pub use validation::{ValidationError, ValidationErrorKind};
 
 use crypto::verify_signature;
 use format::parse_license_bytes;
 use validation::validate_payload;
 
-pub const DEFAULT_APP_ID: &str = "roping_manager";
+pub use shared_core::DEFAULT_APP_ID;
 pub const VALID_PLANS: &[&str] = &["monthly", "yearly", "per_event"];
 pub const PAYLOAD_VERSION_CURRENT: u32 = 4;
 

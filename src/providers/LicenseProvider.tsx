@@ -13,6 +13,7 @@ import type { LicenseStatusDto } from '../types/license'
 interface LicenseContextValue {
   status: LicenseStatusDto | null
   loading: boolean
+  refreshing: boolean
   refresh: () => Promise<void>
   setStatus: (next: LicenseStatusDto | null) => void
   isActive: boolean
@@ -23,34 +24,42 @@ const LicenseContext = createContext<LicenseContextValue | null>(null)
 export function LicenseProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<LicenseStatusDto | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    try {
-      const response = await getLicenseStatus()
-      setStatus(response)
-    } finally {
-      setLoading(false)
-    }
+  const fetchStatus = useCallback(async () => {
+    const response = await getLicenseStatus()
+    setStatus(response)
   }, [])
 
+  const refresh = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      await fetchStatus()
+    } finally {
+      setRefreshing(false)
+    }
+  }, [fetchStatus])
+
   useEffect(() => {
-    refresh().catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[LicenseProvider] No se pudo obtener el estado de la licencia', err)
-    })
-  }, [refresh])
+    fetchStatus()
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[LicenseProvider] No se pudo obtener el estado de la licencia', err)
+      })
+      .finally(() => setLoading(false))
+  }, [fetchStatus])
 
   const value = useMemo<LicenseContextValue>(() => {
-    const isActive = status?.status === 'active'
+    const isActive = status?.status === 'active' && !status?.is_placeholder
     return {
       status,
       loading,
+      refreshing,
       refresh,
       setStatus,
       isActive,
     }
-  }, [status, loading, refresh])
+  }, [status, loading, refreshing, refresh])
 
   return <LicenseContext.Provider value={value}>{children}</LicenseContext.Provider>
 }

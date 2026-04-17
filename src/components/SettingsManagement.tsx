@@ -5,6 +5,8 @@ import { Switch } from './ui/switch'
 import { toast } from 'sonner'
 import { LicensePanel } from './LicensePanel'
 import { useLicense } from '../providers/LicenseProvider'
+import { Loader2 } from 'lucide-react'
+import { getLicenseBadge, getLicenseSummaryMessage, maskDeviceHash } from '../lib/license-ui'
 
 const tabs = [
   'Perfil de usuario',
@@ -16,24 +18,11 @@ const tabs = [
 export function SettingsManagement() {
   const [active, setActive] = useState(tabs[0])
   const [clearTempOnClose, setClearTempOnClose] = useState(false)
-  const { status: licenseSummary, loading: loadingLicense, refresh } = useLicense()
+  const { status: licenseSummary, loading: loadingLicense, refreshing, refresh } = useLicense()
+  const hasLicense = Boolean(licenseSummary && !licenseSummary.is_placeholder)
 
   const badge = useMemo(() => {
-    if (!licenseSummary) {
-      return { label: 'Sin licencia', className: 'bg-slate-100 text-slate-600' }
-    }
-    switch (licenseSummary.status) {
-      case 'active':
-        return { label: 'Activa', className: 'bg-green-50 text-green-700' }
-      case 'expired':
-        return { label: 'Expirada', className: 'bg-red-50 text-red-700' }
-      case 'not_yet_valid':
-        return { label: 'Pendiente', className: 'bg-yellow-50 text-yellow-700' }
-      case 'invalid_device':
-        return { label: 'Otro dispositivo', className: 'bg-orange-50 text-orange-700' }
-      default:
-        return { label: 'Sin licencia', className: 'bg-slate-100 text-slate-600' }
-    }
+    return getLicenseBadge(licenseSummary?.status)
   }, [licenseSummary])
 
   const formatDate = (value?: number | null) => {
@@ -85,18 +74,38 @@ export function SettingsManagement() {
                     </span>
                   </div>
 
-                  <div className="mt-6 grid gap-4 md:grid-cols-2">
-                    <InfoTile label="Titular" value={licenseSummary?.customer_name ?? '—'} />
-                    <InfoTile label="Plan" value={licenseSummary?.plan ?? '—'} />
-                    <InfoTile label="Vigencia" value={formatDate(licenseSummary?.not_before)} />
-                    <InfoTile label="Expira" value={formatDate(licenseSummary?.not_after)} />
-                    <InfoTile label="License ID" value={licenseSummary?.license_id ?? '—'} mono />
-                    <InfoTile label="Device hash" value={licenseSummary?.device_hash_hex ?? '—'} mono />
-                  </div>
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    {licenseSummary ? getLicenseSummaryMessage(licenseSummary) : 'Instala una licencia válida para activar Roping Manager.'}
+                  </p>
+
+                  {hasLicense ? (
+                    <div className="mt-6 grid gap-4 md:grid-cols-2">
+                      <InfoTile label="Titular" value={licenseSummary?.customer_name ?? '—'} />
+                      <InfoTile label="Plan" value={licenseSummary?.plan ?? '—'} />
+                      <InfoTile label="Vigencia" value={formatDate(licenseSummary?.not_before)} />
+                      <InfoTile label="Expira" value={formatDate(licenseSummary?.not_after)} />
+                      <InfoTile label="License ID" value={licenseSummary?.license_id ?? '—'} mono />
+                      <InfoTile label="Device hash" value={maskDeviceHash(licenseSummary?.device_hash_hex)} mono />
+                    </div>
+                  ) : (
+                    <p className="mt-4 text-sm text-muted-foreground">
+                      Instala una licencia válida para ver los detalles de activación.
+                    </p>
+                  )}
 
                   <div className="mt-6 flex flex-wrap gap-3">
-                    <Button onClick={() => refresh().catch((err) => toast.error(err.message || 'No se pudo actualizar'))} variant="outline" disabled={loadingLicense}>
-                      {loadingLicense ? 'Actualizando...' : 'Actualizar'}
+                    <Button
+                      onClick={() =>
+                        refresh().catch((err) =>
+                          toast.error(err instanceof Error ? err.message : 'No se pudo actualizar'),
+                        )
+                      }
+                      variant="outline"
+                      disabled={loadingLicense || refreshing}
+                      className="inline-flex items-center gap-2"
+                    >
+                      {loadingLicense || refreshing ? <Loader2 className="size-4 animate-spin" /> : null}
+                      {loadingLicense || refreshing ? 'Actualizando...' : 'Actualizar'}
                     </Button>
                     <Button variant="secondary" onClick={() => setActive('Licencia')}>
                       Abrir panel de licencias

@@ -13,3 +13,4 @@ serde_cbor = "0.11"
 thiserror = "1"
 hex = "0.4"
 rand = "0.8"
+shared_core = { path = "../../../../shared_core" }

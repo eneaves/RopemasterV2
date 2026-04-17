@@ -1,10 +1,11 @@
-import { RefreshCcw, ShieldAlert } from 'lucide-react'
+import { Loader2, RefreshCcw, ShieldAlert } from 'lucide-react'
 import { Button } from './ui/button'
 import { LicensePanel } from './LicensePanel'
 import { useLicense } from '../providers/LicenseProvider'
+import { getLicenseGateMessage } from '../lib/license-ui'
 
 export function LicenseGate() {
-  const { status, loading, refresh } = useLicense()
+  const { status, loading, refresh, refreshing } = useLicense()
 
   if (loading) {
     return (
@@ -15,7 +16,7 @@ export function LicenseGate() {
     )
   }
 
-  const message = gateMessage(status?.status)
+  const message = getLicenseGateMessage(status?.status)
 
   return (
     <div className="min-h-screen w-full bg-muted/30 flex flex-col items-center justify-center px-4 py-10">
@@ -27,33 +28,19 @@ export function LicenseGate() {
             <Button
               variant="outline"
               size="sm"
+              disabled={refreshing}
               onClick={() => refresh().catch(() => {})}
               className="inline-flex items-center gap-2"
             >
-              <RefreshCcw className="size-4" />
-              Reintentar verificación
+              {refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCcw className="size-4" />}
+              {refreshing ? 'Actualizando...' : 'Reintentar verificación'}
             </Button>
           </div>
         </div>
         <div className="bg-card border border-border rounded-2xl shadow-lg p-6">
-          <LicensePanel />
+          <LicensePanel variant="gate" />
         </div>
       </div>
     </div>
   )
-}
-
-function gateMessage(status?: string) {
-  switch (status) {
-    case 'expired':
-      return 'La licencia instalada ha expirado. Instala una nueva para desbloquear todas las funciones.'
-    case 'not_yet_valid':
-      return 'La licencia aún no es válida en este dispositivo. Verifica la hora del sistema o contacta a soporte.'
-    case 'invalid_device':
-      return 'La licencia instalada pertenece a otro dispositivo. Solicita una licencia para este equipo.'
-    case 'active':
-      return 'Licencia verificada.'
-    default:
-      return 'No se detectó una licencia válida. Todas las funciones permanecerán bloqueadas hasta instalar una.'
-  }
 }

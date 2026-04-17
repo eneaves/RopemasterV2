@@ -4,28 +4,42 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use license_core::LicensePayload;
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 use time::OffsetDateTime;
 
 pub mod commands;
-mod device;
-mod storage;
-mod validator;
+mod model;
+pub(crate) mod modern;
+#[cfg(test)]
+mod phase1_e2e_tests;
+#[cfg(test)]
+mod phase2_binding_tests;
+#[cfg(test)]
+mod phase3_policy_tests;
+#[cfg(test)]
+mod phase5_hybrid_groundwork_tests;
+pub mod runtime;
+pub(crate) mod storage;
+pub(crate) mod validator;
 
 use ed25519_dalek::PublicKey;
+pub(crate) use model::{
+    BindingMatch, LicenseFormatKind, NormalizedFailureReason, NormalizedLicense,
+};
 
+/// Compatibility shim that exposes the cached license status to the rest of
+/// the backend while the new runtime evolves. All mutations happen through
+/// `LicenseRuntime`, but existing callers can keep using `LicenseState`.
 #[derive(Clone)]
 pub struct LicenseState {
     cache: Arc<RwLock<Option<LicenseCache>>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LicenseCache {
-    pub payload: LicensePayload,
+    pub license: NormalizedLicense,
     pub installed_at: i64,
     pub last_verified_at: i64,
 }
@@ -58,11 +72,21 @@ pub fn ensure_active(state: &LicenseState) -> Result<LicenseCache, CommandError>
         )
     })?;
 
-    let payload = &cache.payload;
+    // Binding enforcement: a DeviceMismatch license must never be treated as
+    // active regardless of its time window. This prevents any caller that holds
+    // a direct LicenseState reference from bypassing the runtime status check.
+    if cache.license.binding == BindingMatch::Mismatch {
+        return Err(CommandError::new(
+            "DeviceMismatch",
+            "La licencia pertenece a otro dispositivo.",
+        ));
+    }
+
+    let payload = &cache.license;
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    let not_before = payload.not_before as i64;
-    let not_after = payload.not_after as i64;
-    let skew = payload.max_clock_skew as i64;
+    let not_before = payload.not_before;
+    let not_after = payload.not_after;
+    let skew = payload.max_clock_skew;
 
     if now + skew < not_before {
         return Err(CommandError::new(
@@ -106,54 +130,21 @@ impl CommandError {
 
 pub type CmdResult<T> = Result<T, CommandError>;
 
-static LICENSE_PUBLIC_KEY: Lazy<RwLock<PublicKey>> = Lazy::new(|| {
-    let bytes = include_bytes!("public_key_dev.der");
-    let key = PublicKey::from_bytes(bytes).expect("invalid embedded license public key");
-    RwLock::new(key)
-});
-
+#[allow(dead_code)]
 pub fn public_key() -> PublicKey {
-    *LICENSE_PUBLIC_KEY.read().expect("public key lock poisoned")
+    runtime::keyring::embedded_public_key()
 }
 
 pub async fn bootstrap(
     app: &AppHandle,
     pool: &SqlitePool,
-    state: &LicenseState,
-) -> anyhow::Result<()> {
-    if let Some(record) = storage::load_blob(pool).await? {
-        let device_hash = device::get_or_init_device_hash(app)
-            .map_err(|err| anyhow::anyhow!(err.message.clone()))?;
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let key = public_key();
-        match validator::evaluate_license(&key, &record.raw_bytes, &device_hash, now) {
-            Ok(evaluation) => {
-                if evaluation.status != validator::LicenseRuntimeStatus::Active {
-                    tracing::info!("License bootstrap classification: {:?}", evaluation.status);
-                }
-                state.replace(Some(LicenseCache {
-                    payload: evaluation.payload,
-                    installed_at: record.installed_at,
-                    last_verified_at: now,
-                }));
-                if record.last_verified_at != now {
-                    storage::update_last_verified(pool, now).await?;
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to bootstrap license: {} ({})",
-                    err.message,
-                    err.code
-                );
-                storage::delete_blob(pool).await?;
-                state.replace(None);
-            }
-        }
-    } else {
-        state.replace(None);
-    }
-    Ok(())
+) -> anyhow::Result<runtime::LicenseRuntime> {
+    let state = LicenseState::default();
+    let binding = runtime::DeviceBindingStore::load_or_init(app)
+        .map_err(|err| anyhow::anyhow!(err.message.clone()))?;
+    let runtime = runtime::LicenseRuntime::new(binding, runtime::default_keyring(), state.clone());
+    runtime.reload_from_storage(pool).await?;
+    Ok(runtime)
 }
 
 pub(crate) fn ensure_parent_dir(path: &Path) -> io::Result<()> {

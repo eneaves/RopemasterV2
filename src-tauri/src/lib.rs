@@ -23,11 +23,12 @@ mod license;
 
 /* ------------------- STATE ------------------- */
 #[derive(Clone)]
-struct Db(SqlitePool, license::LicenseState);
+struct Db(SqlitePool, license::runtime::LicenseRuntime);
 
 impl Db {
     fn require_license(&self) -> Result<(), String> {
-        license::ensure_active(&self.1)
+        self.1
+            .ensure_active()
             .map(|_| ())
             .map_err(|err| err.message)
     }
@@ -3562,7 +3563,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
-            let license_state = license::LicenseState::default();
             let db_path = resolve_db_path(handle)?;
             // Asegura el directorio padre por si acaso (aunque resolve_db_path crea la carpeta)
             if let Some(parent) = db_path.parent() {
@@ -3587,8 +3587,10 @@ pub fn run() {
                     .await?;
 
                 sqlx::migrate!("./migrations").run(&pool).await?;
-                license::bootstrap(handle, &pool, &license_state).await?;
-                app.manage(Db(pool.clone(), license_state.clone()));
+                let runtime = license::bootstrap(handle, &pool).await?;
+                let license_state = runtime.license_state();
+                app.manage(Db(pool.clone(), runtime.clone()));
+                app.manage(runtime);
                 app.manage(license_state);
                 Ok::<(), anyhow::Error>(())
             })?;
@@ -3664,10 +3666,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use license::{LicenseCache, LicenseState};
-    use license_core::{LicensePayload, DEFAULT_APP_ID, PAYLOAD_VERSION_CURRENT};
+    use crate::license::modern;
+    use crate::license::validator::DEFAULT_APP_ID;
+    use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer};
+    use license::runtime::{
+        device_binding::DeviceBindingStore, keyring::LicenseKeyring, LicenseRuntime,
+        LicenseSummaryStatus,
+    };
+    use license::storage::StoredLicenseBlob;
+    use license::{BindingMatch, LicenseCache, LicenseFormatKind, LicenseState, NormalizedLicense};
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use time::OffsetDateTime;
     use uuid::Uuid;
 
@@ -3691,34 +3701,220 @@ mod tests {
             .await
             .expect("migrations failed");
 
-        let state = LicenseState::default();
+        let runtime = runtime_for_tests();
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        state.replace(Some(LicenseCache {
-            payload: mock_license_payload(now),
+        runtime.update_cache(LicenseCache {
+            license: mock_normalized_license(now, runtime.device_hash()),
             installed_at: now,
             last_verified_at: now,
-        }));
+        });
 
-        Db(pool, state)
+        Db(pool, runtime)
     }
 
-    fn mock_license_payload(now: i64) -> LicensePayload {
-        LicensePayload {
-            ver: PAYLOAD_VERSION_CURRENT,
-            key_id: 1,
-            serial: 1,
-            license_id: "test-license".into(),
-            issued_at: now as u64,
-            not_before: (now - 60) as u64,
-            not_after: (now + 60 * 60) as u64,
-            max_clock_skew: 60,
-            allowed_device_hash: [0; 32],
-            plan: "monthly".into(),
-            features: BTreeMap::new(),
-            policy: BTreeMap::new(),
-            customer_name: Some("QA".into()),
-            app_id: DEFAULT_APP_ID.into(),
+    fn runtime_for_tests() -> LicenseRuntime {
+        let dir =
+            std::env::temp_dir().join(format!("license-runtime-lib-tests-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp binding dir");
+        let binding = DeviceBindingStore::load_or_init_from_dir(&dir).expect("init device binding");
+        LicenseRuntime::new(
+            binding,
+            license::runtime::default_keyring(),
+            LicenseState::default(),
+        )
+    }
+
+    #[derive(Clone)]
+    struct FixedKeyring(PublicKey);
+
+    impl LicenseKeyring for FixedKeyring {
+        fn active_key(&self) -> PublicKey {
+            self.0
         }
+
+        fn resolve_key(&self, key_id: &str) -> Option<PublicKey> {
+            (key_id == "primary").then_some(self.0)
+        }
+    }
+
+    fn runtime_with_test_keypair() -> (LicenseRuntime, Keypair) {
+        let dir = std::env::temp_dir().join(format!("license-runtime-fixed-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp binding dir");
+        let binding = DeviceBindingStore::load_or_init_from_dir(&dir).expect("init device binding");
+        let keypair = fixed_test_keypair();
+        let keyring: Arc<dyn LicenseKeyring + Send + Sync> = Arc::new(FixedKeyring(keypair.public));
+        let runtime = LicenseRuntime::new(binding, keyring, LicenseState::default());
+        (runtime, keypair)
+    }
+
+    fn fixed_test_keypair() -> Keypair {
+        let secret =
+            SecretKey::from_bytes(&[0xAB; 32]).expect("secret key should be 32 bytes exactly");
+        let public: PublicKey = (&secret).into();
+        Keypair { secret, public }
+    }
+
+    fn mock_normalized_license(now: i64, device_hash: [u8; 32]) -> NormalizedLicense {
+        NormalizedLicense {
+            format: LicenseFormatKind::ModernLicgen,
+            format_version: modern::FORMAT_VERSION,
+            app_id: DEFAULT_APP_ID.into(),
+            signature_valid: true,
+            key_id: Some("primary".into()),
+            key_version: None,
+            license_id: "test-license".into(),
+            plan: Some("monthly".into()),
+            customer_name: Some("QA".into()),
+            issued_at: now,
+            not_before: now - 60,
+            not_after: now + 60 * 60,
+            max_clock_skew: 60,
+            max_offline_days: 30,
+            lease_required: false,
+            revocation_epoch: None,
+            allowed_fingerprints_count: 0,
+            device_hash_hex: hex::encode(device_hash),
+            installation_id: None,
+            installation_pubkey: None,
+            binding: BindingMatch::Current,
+            blob_len: 128,
+            blob_sha256: "deadbeef".into(),
+            failure_reason: None,
+        }
+    }
+
+    fn encode_modern_license_bytes(
+        keypair: &Keypair,
+        device_hash: &[u8; 32],
+        runtime: &LicenseRuntime,
+        now: i64,
+    ) -> Vec<u8> {
+        use base64::Engine as _;
+        use chrono::{Duration, TimeZone, Utc};
+        use serde_json::json;
+        let installation_id = runtime.binding().installation_id();
+        let installation_pubkey = base64::engine::general_purpose::STANDARD
+            .encode(runtime.binding().installation_pubkey());
+        let device_hash_hex = hex::encode(device_hash);
+        let issued_at = Utc.timestamp_opt(now, 0).single().unwrap();
+        let payload = json!({
+            "license_version": modern::LICENSE_VERSION,
+            "license_id": Uuid::new_v4(),
+            "installation": {
+                "installation_id": installation_id,
+                "installation_pubkey": installation_pubkey,
+                "device_fingerprint": {
+                    "version": 2,
+                    "hardware_hash": device_hash_hex,
+                    "platform": "macos",
+                    "components": [],
+                    "binding": { "stable": [], "strict": [], "observations": [] }
+                },
+                "first_seen_at": issued_at,
+                "last_online_check_at": null
+            },
+            "issued_at": issued_at,
+            "expires_at": issued_at + Duration::hours(1),
+            "offline_policy": {
+                "lease_required": false,
+                "max_offline_days": 30,
+                "grace_days": 5,
+                "last_online_check_at": null
+            },
+            "security_policy": {
+                "policy_version": 1,
+                "revocation_epoch": null,
+                "key_id": "primary",
+                "key_version": "2026.04",
+                "allowed_fingerprints": []
+            },
+            "device_fingerprint_v2": {
+                "version": 2,
+                "hardware_hash": device_hash_hex,
+                "platform": "macos",
+                "components": [],
+                "binding": { "stable": [], "strict": [], "observations": [] }
+            },
+            "metadata": {
+                "app_id": DEFAULT_APP_ID,
+                "plan": "monthly",
+                "customer_name_hint": "QA"
+            }
+        });
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let signature = keypair.sign(&payload_bytes).to_bytes();
+        let mut out = Vec::new();
+        out.extend_from_slice(modern::LICENSE_MAGIC);
+        out.extend_from_slice(&modern::FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&(payload_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&payload_bytes);
+        out.extend_from_slice(&(signature.len() as u16).to_le_bytes());
+        out.extend_from_slice(&signature);
+        out
+    }
+
+    #[tokio::test]
+    async fn bootstrap_valid_license_updates_runtime_and_guard() {
+        let (runtime, keypair) = runtime_with_test_keypair();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let bytes = encode_modern_license_bytes(&keypair, &runtime.device_hash(), &runtime, now);
+        let blob = StoredLicenseBlob {
+            raw_bytes: bytes,
+            installed_at: now,
+            last_verified_at: now,
+        };
+        assert!(runtime.apply_stored_license_for_test(&blob, now));
+        let summary = runtime.summary();
+        assert_eq!(summary.status, LicenseSummaryStatus::Active);
+        assert!(runtime.license_state().snapshot().is_some());
+        runtime.ensure_active().expect("ensure_active");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .foreign_keys(true),
+            )
+            .await
+            .expect("build pool");
+        let db = Db(pool, runtime.clone());
+        assert!(db.require_license().is_ok());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_invalid_license_blocks_guard() {
+        let (runtime, keypair) = runtime_with_test_keypair();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mut bytes =
+            encode_modern_license_bytes(&keypair, &runtime.device_hash(), &runtime, now);
+        // Flip a byte inside the payload segment to break the signature.
+        if let Some(byte) = bytes.get_mut(20) {
+            *byte ^= 0xFF;
+        }
+        let blob = StoredLicenseBlob {
+            raw_bytes: bytes,
+            installed_at: now,
+            last_verified_at: now,
+        };
+        assert!(!runtime.apply_stored_license_for_test(&blob, now));
+        let summary = runtime.summary();
+        assert_eq!(summary.status, LicenseSummaryStatus::Invalid);
+        assert!(runtime.license_state().snapshot().is_none());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .foreign_keys(true),
+            )
+            .await
+            .expect("build pool");
+        let db = Db(pool, runtime.clone());
+        assert!(db.require_license().is_err());
     }
 
     async fn seed_event(db: &Db) -> i64 {
