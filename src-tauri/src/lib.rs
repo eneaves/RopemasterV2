@@ -101,6 +101,110 @@ async fn load_round_order(
     .map_err(|e| e.to_string())
 }
 
+async fn reconcile_future_runs(pool: &SqlitePool, event_id: i64) -> Result<(), String> {
+    // Mark future seeded runs as skipped when the same team was already eliminated
+    // in a previous completed round via NT or DQ.
+    sqlx::query(
+        r#"
+        UPDATE run
+        SET
+          status = 'skipped',
+          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE event_id = ?1
+          AND status != 'completed'
+          AND EXISTS (
+            SELECT 1
+            FROM run prior
+            WHERE prior.event_id = run.event_id
+              AND prior.team_id = run.team_id
+              AND prior.round < run.round
+              AND prior.status = 'completed'
+              AND (prior.no_time = 1 OR prior.dq = 1)
+          )
+        "#,
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // If a previous NT/DQ is corrected to a valid time, restore future seeded runs
+    // so they can be captured again.
+    sqlx::query(
+        r#"
+        UPDATE run
+        SET
+          status = 'pending',
+          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE event_id = ?1
+          AND status = 'skipped'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM run prior
+            WHERE prior.event_id = run.event_id
+              AND prior.team_id = run.team_id
+              AND prior.round < run.round
+              AND prior.status = 'completed'
+              AND (prior.no_time = 1 OR prior.dq = 1)
+          )
+        "#,
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+async fn reconcile_all_future_runs(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE run
+        SET
+          status = 'skipped',
+          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE status != 'completed'
+          AND EXISTS (
+            SELECT 1
+            FROM run prior
+            WHERE prior.event_id = run.event_id
+              AND prior.team_id = run.team_id
+              AND prior.round < run.round
+              AND prior.status = 'completed'
+              AND (prior.no_time = 1 OR prior.dq = 1)
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE run
+        SET
+          status = 'pending',
+          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        WHERE status = 'skipped'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM run prior
+            WHERE prior.event_id = run.event_id
+              AND prior.team_id = run.team_id
+              AND prior.round < run.round
+              AND prior.status = 'completed'
+              AND (prior.no_time = 1 OR prior.dq = 1)
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /* ------------------- HEALTH ------------------- */
 #[tauri::command]
 async fn health_check(db: State<'_, Db>) -> Result<String, String> {
@@ -139,6 +243,7 @@ struct SeriesRow {
 #[tauri::command]
 async fn list_series(db: State<'_, Db>) -> Result<Vec<SeriesRow>, String> {
     db.require_license()?;
+    reconcile_all_future_runs(&db.0).await?;
     sqlx::query_as::<_, SeriesRow>(
         r#"
         SELECT 
@@ -149,7 +254,7 @@ async fn list_series(db: State<'_, Db>) -> Result<Vec<SeriesRow>, String> {
                 (
                     SELECT 
                         CASE WHEN COUNT(r.id) = 0 THEN 0.0
-                        ELSE CAST(SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS REAL) / COUNT(r.id) * 100.0
+                        ELSE CAST(SUM(CASE WHEN r.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) AS REAL) / COUNT(r.id) * 100.0
                         END
                     FROM run r
                     JOIN event e ON r.event_id = e.id
@@ -972,29 +1077,7 @@ async fn save_run(db: State<'_, Db>, payload: SaveRun) -> Result<i64, String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // Si es NT o DQ, sacar al equipo de las rondas siguientes (status='skipped')
-    if payload.no_time || payload.dq {
-        sqlx::query(
-            "UPDATE run SET status = 'skipped' WHERE event_id = ?1 AND team_id = ?2 AND round > ?3",
-        )
-        .bind(payload.event_id)
-        .bind(payload.team_id)
-        .bind(payload.round)
-        .execute(&db.0)
-        .await
-        .map_err(|e| e.to_string())?;
-    } else {
-        // Si se corrige y es tiempo válido, restaurar rondas futuras a 'pending' si estaban 'skipped'
-        sqlx::query(
-            "UPDATE run SET status = 'pending' WHERE event_id = ?1 AND team_id = ?2 AND round > ?3 AND status = 'skipped'"
-        )
-        .bind(payload.event_id)
-        .bind(payload.team_id)
-        .bind(payload.round)
-        .execute(&db.0)
-        .await
-        .map_err(|e| e.to_string())?;
-    }
+    reconcile_future_runs(&db.0, payload.event_id).await?;
 
     let run_id = res.last_insert_rowid();
     log_audit(
@@ -2301,6 +2384,7 @@ async fn get_runs(
     round: Option<i64>,
 ) -> Result<Vec<RunRow>, String> {
     db.require_license()?;
+    reconcile_future_runs(&db.0, event_id).await?;
     if let Some(r) = round {
         sqlx::query_as::<_, RunRow>(
             r#"
@@ -2357,6 +2441,7 @@ async fn get_runs_expanded(
     round: Option<i64>,
 ) -> Result<Vec<RunExpandedRow>, String> {
     db.require_license()?;
+    reconcile_future_runs(&db.0, event_id).await?;
     let base_query = r#"
         SELECT
           r.id, r.event_id, r.team_id, r.round, r.position,
@@ -2534,9 +2619,9 @@ async fn generate_draw(db: State<'_, Db>, opts: GenerateDrawOptions) -> Result<i
         // Intermediate rounds: preserve the initial draw order while filtering NT/DQ
         let base_order = load_round_order(&db.0, opts.event_id, 1).await?;
         if base_order.is_empty() {
-            if opts.reseed.unwrap_or(true) {
-                teams.shuffle(&mut thread_rng());
-            }
+            return Err(
+                "La ronda 1 no ha sido generada. Genera el draw de la ronda 1 primero antes de generar rondas intermedias.".into()
+            );
         } else {
             let active_set: HashSet<i64> = teams.iter().copied().collect();
             let mut seen: HashSet<i64> = HashSet::new();
@@ -2992,6 +3077,7 @@ struct DashboardStats {
 async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String> {
     db.require_license()?;
     let pool = &db.0;
+    reconcile_all_future_runs(pool).await?;
 
     let total_series: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE is_deleted = 0")
         .fetch_one(pool)
@@ -3078,7 +3164,7 @@ async fn get_dashboard_stats(db: State<'_, Db>) -> Result<DashboardStats, String
         r#"
         SELECT 
             CASE WHEN COUNT(r.id) = 0 THEN 0.0
-            ELSE CAST(SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS REAL) / COUNT(r.id) * 100.0
+            ELSE CAST(SUM(CASE WHEN r.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) AS REAL) / COUNT(r.id) * 100.0
             END
         FROM run r
         JOIN event e ON r.event_id = e.id

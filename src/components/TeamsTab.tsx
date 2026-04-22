@@ -62,6 +62,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   const {
     roster: eventRoster,
     activeRoster,
+    confirmedRoster,
     sync: syncRosterEntries,
     refresh: refreshEventRoster,
     updateEntry: updateRosterEntry,
@@ -88,6 +89,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   const rosterFileRef = useRef<HTMLInputElement | null>(null)
   const [syncingRoster, setSyncingRoster] = useState(false)
   const [isRosterModalOpen, setIsRosterModalOpen] = useState(false)
+  const [rosterQuery, setRosterQuery] = useState('')
   const [isDirectoryModalOpen, setIsDirectoryModalOpen] = useState(false)
   const [directoryQuery, setDirectoryQuery] = useState('')
   const [addingRoperId, setAddingRoperId] = useState<number | null>(null)
@@ -144,10 +146,10 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   }
 
   const rosterOptions = useMemo(() => {
-    if (activeRoster.length > 0) {
-      return activeRoster.map((r) => ({
+    if (eventRoster.length > 0) {
+      return confirmedRoster.map((r) => ({
         id: Number(r.roperId),
-        label: `${r.firstName} ${r.lastName} — ${r.level} (${r.status === 'confirmed' ? 'Confirmado' : 'Registrado'})`,
+        label: `${r.firstName} ${r.lastName} — ${r.level} (Confirmado)`,
         rating: Number(r.ratingOverride ?? r.rating ?? 0),
       }))
     }
@@ -156,9 +158,24 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
       label: `${r.firstName} ${r.lastName} — ${r.level ?? 'amateur'}`,
       rating: r.rating,
     }))
-  }, [activeRoster, globalRopers])
+  }, [confirmedRoster, eventRoster.length, globalRopers])
 
-  const rosterIds = useMemo(() => new Set(activeRoster.map((r) => Number(r.roperId))), [activeRoster])
+  const rosterIds = useMemo(() => new Set(eventRoster.map((r) => Number(r.roperId))), [eventRoster])
+  const unconfirmedActiveRoster = useMemo(
+    () => activeRoster.filter((r) => r.status !== 'confirmed'),
+    [activeRoster],
+  )
+
+  const filteredRoster = useMemo(() => {
+    const q = rosterQuery.trim().toLowerCase()
+    return eventRoster.filter((entry) => {
+      if (!q) return true
+      const fullName = `${entry.firstName} ${entry.lastName}`.toLowerCase()
+      const email = String(entry.email ?? '').toLowerCase()
+      const specialty = String(entry.specialty ?? '').toLowerCase()
+      return fullName.includes(q) || email.includes(q) || specialty.includes(q)
+    })
+  }, [eventRoster, rosterQuery])
 
   const filteredDirectory = useMemo(() => {
     const q = directoryQuery.trim().toLowerCase()
@@ -222,6 +239,10 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
   const handleOpenCreateModal = () => {
     if (isLocked) {
       toast.error('Evento bloqueado. No puedes crear equipos.')
+      return
+    }
+    if (eventRoster.length > 0 && unconfirmedActiveRoster.length > 0) {
+      toast.error('Todos los ropers activos deben estar confirmados antes de generar equipos.')
       return
     }
     setEditingTeam(null)
@@ -541,6 +562,11 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
       setIsAutoCreateModalOpen(false)
       return
     }
+    if (eventRoster.length > 0 && unconfirmedActiveRoster.length > 0) {
+      toast.error('Todos los ropers activos deben estar confirmados antes de generar equipos.')
+      setIsAutoCreateModalOpen(false)
+      return
+    }
 
     try {
         // Clear existing teams
@@ -553,8 +579,9 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
             toast.error('No se pudo limpiar equipos previos antes de auto-crear.');
         }
 
-        const rosterCandidates = activeRoster.length > 0
-          ? activeRoster.map((r) => ({
+        const sourceRoster = eventRoster.length > 0 ? confirmedRoster : activeRoster
+        const rosterCandidates = sourceRoster.length > 0
+          ? sourceRoster.map((r) => ({
               id: Number(r.roperId),
               firstName: r.firstName,
               lastName: r.lastName,
@@ -619,8 +646,9 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
         }
         
         if (created > 0) {
+           const source = eventRoster.length > 0 ? 'confirmados' : 'activos'
            toast.success(`⚡ ${created} equipos (Todos vs Todos) creados.`, {
-             description: failed > 0 ? `${failed} fallidos.` : undefined,
+             description: `Basado en ${sourceRoster.length} ropers ${source}.${failed > 0 ? ` ${failed} fallidos.` : ''}`,
            })
         } else {
            toast.info('No se generaron nuevos equipos.')
@@ -707,7 +735,13 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
         </div>
       </div>
 
-      <Dialog open={isRosterModalOpen} onOpenChange={setIsRosterModalOpen}>
+      <Dialog
+        open={isRosterModalOpen}
+        onOpenChange={(open) => {
+          setIsRosterModalOpen(open)
+          if (!open) setRosterQuery('')
+        }}
+      >
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle>Roster del Evento</DialogTitle>
@@ -715,9 +749,20 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
               Actualiza el estado y las notas de los participantes antes de emparejarlos.
             </DialogDescription>
           </DialogHeader>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={rosterQuery}
+              onChange={(e) => setRosterQuery(e.target.value)}
+              placeholder="Buscar ropers..."
+              className="pl-9"
+            />
+          </div>
           <div className="max-h-[60vh] overflow-y-auto border rounded-lg">
             {eventRoster.length === 0 ? (
               <div className="p-4 text-sm text-muted-foreground">No hay ropers registrados para este evento todavía.</div>
+            ) : filteredRoster.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground">No se encontraron ropers con esa búsqueda.</div>
             ) : (
               <Table>
                 <TableHeader>
@@ -728,7 +773,7 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {eventRoster.map((entry) => (
+                  {filteredRoster.map((entry) => (
                     <TableRow key={entry.id}>
                       <TableCell>
                         <div className="font-medium text-foreground">

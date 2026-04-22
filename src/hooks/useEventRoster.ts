@@ -48,7 +48,7 @@ export function useEventRoster(eventId?: number) {
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(
-    async (includeWithdrawn = false) => {
+    async (includeWithdrawn = true) => {
       if (!eventId || Number.isNaN(eventId)) {
         setRoster([])
         return []
@@ -77,7 +77,7 @@ export function useEventRoster(eventId?: number) {
       setRoster([])
       return
     }
-    refresh()
+    refresh(true)
   }, [eventId, refresh])
 
   const sync = useCallback(
@@ -97,7 +97,7 @@ export function useEventRoster(eventId?: number) {
           withdraw_absent: withdrawAbsent,
         })
         toast.success(`Roster sincronizado (${result.roster_upserts} registros)`)
-        await refresh()
+        await refresh(true)
         return result
       } catch (e: any) {
         const msg = String(e?.message ?? e)
@@ -143,9 +143,15 @@ export function useEventRoster(eventId?: number) {
     [roster],
   )
 
+  const confirmedRoster = useMemo(
+    () => roster.filter((r) => r.status === 'confirmed'),
+    [roster],
+  )
+
   return {
     roster,
     activeRoster,
+    confirmedRoster,
     loading,
     error,
     refresh,

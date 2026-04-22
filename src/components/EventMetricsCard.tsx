@@ -22,7 +22,7 @@ export function EventMetricsCard({ event }: EventMetricsCardProps) {
       : potValue
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
       {/* Total Teams */}
       <div className="bg-card border border-border rounded-xl p-5 shadow-sm flex flex-col justify-between hover:border-primary/50 transition-colors group">
         <div className="flex justify-between items-start mb-2">

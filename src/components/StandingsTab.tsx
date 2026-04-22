@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react'
-import { Search, Download, RefreshCw } from 'lucide-react'
+import { Search, Download, RefreshCw, Maximize2, Minimize2 } from 'lucide-react'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -42,6 +42,7 @@ export function StandingsTab({ event }: StandingsTabProps) {
   const [filterQuery, setFilterQuery] = useState('')
   const [placeFilter, setPlaceFilter] = useState('Todos')
   const [loading, setLoading] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   const fetchData = async () => {
     if (!event?.id) return
@@ -136,7 +137,7 @@ export function StandingsTab({ event }: StandingsTabProps) {
   }
 
   return (
-    <div className="space-y-6 h-full flex flex-col">
+    <div className={`space-y-6 pb-4 ${isFullscreen ? 'fixed inset-0 z-50 bg-background p-6 overflow-y-auto' : ''}`}>
       {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
@@ -147,6 +148,10 @@ export function StandingsTab({ event }: StandingsTabProps) {
           <p className="text-muted-foreground">Clasificación en tiempo real y desglose de premios</p>
         </div>
         <div className="flex items-center gap-2">
+           <Button variant="outline" onClick={() => setIsFullscreen((prev) => !prev)} className="h-10">
+              {isFullscreen ? <Minimize2 className="w-4 h-4 mr-2" /> : <Maximize2 className="w-4 h-4 mr-2" />}
+              {isFullscreen ? 'Salir de fullscreen' : 'Fullscreen'}
+           </Button>
            <Button variant="outline" onClick={fetchData} className="h-10">
               <RefreshCw className="w-4 h-4 mr-2" />
               Actualizar
@@ -244,7 +249,7 @@ export function StandingsTab({ event }: StandingsTabProps) {
       </div>
 
       {/* Filters & Table */}
-      <div className="space-y-4 flex-1 flex flex-col min-h-0">
+      <div className="space-y-4">
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -268,8 +273,8 @@ export function StandingsTab({ event }: StandingsTabProps) {
               </Select>
           </div>
 
-          <div className="bg-card border border-border rounded-xl flex-1 overflow-hidden flex flex-col shadow-sm">
-            <div className="overflow-auto flex-1">
+          <div className="bg-card border border-border rounded-xl overflow-hidden flex flex-col shadow-sm">
+            <div className={`${isFullscreen ? 'max-h-[calc(100vh-22rem)]' : 'max-h-[60vh]'} overflow-auto`}>
                 <Table>
                 <TableHeader className="sticky top-0 bg-muted/50 z-10 backdrop-blur-sm">
                     <TableRow className="hover:bg-transparent border-border">

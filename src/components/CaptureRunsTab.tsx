@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Play, Pause, RotateCcw, Save, ChevronLeft, ChevronRight, X, Clock,
-  CheckCircle2, Activity, Lock, Users, Usb, Timer,
+  CheckCircle2, Activity, Lock, Users, Usb, Timer, Search, Maximize2, Minimize2,
 } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -33,7 +33,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./ui/alert-dialog"
-import { Progress } from './ui/progress'
 
 import type { Event, Team as TeamType, Run as RunType } from '../types'
 
@@ -136,6 +135,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const [isManualMode, setIsManualMode] = useState(false)
   const [manualTimeInput, setManualTimeInput] = useState('')
   const [globalStandings, setGlobalStandings] = useState<GlobalStanding[]>([])
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('')
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
   const [inputPin, setInputPin] = useState('')
   const [pinError, setPinError] = useState(false)
@@ -147,9 +147,13 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const [selectedPort, setSelectedPort] = useState<string>('')
   const [timerConnected, setTimerConnected] = useState(false)
   const [showTimerSettings, setShowTimerSettings] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   const totalRounds = event?.rounds ?? 3
   const currentRun = selectedTeamIndex !== null ? runs[selectedTeamIndex] : null
+
+  // Ref map for auto-scrolling team rows
+  const teamRowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map())
 
   const fetchRuns = useCallback(async () => {
     if (!event?.id) return
@@ -250,10 +254,20 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
       const timeInMs = timerEvent.time_seconds * 1000
       setTimerValue(timeInMs)
       setManualTimeInput(timerEvent.time_seconds.toFixed(3))
-      
-      toast.success(`Tiempo capturado: ${timerEvent.time_seconds.toFixed(3)}s`, {
-        description: timerEvent.raw_text.trim()
-      })
+
+      // Registrar automáticamente como NO time si el tiempo supera 15 segundos
+      if (timerEvent.time_seconds > 15) {
+        setNoTime(true)
+        setDq(false)
+        toast.warning(`NO TIME automático: ${timerEvent.time_seconds.toFixed(3)}s (límite 15s)`, {
+          description: timerEvent.raw_text.trim()
+        })
+      } else {
+        setNoTime(false)
+        toast.success(`Tiempo capturado: ${timerEvent.time_seconds.toFixed(3)}s`, {
+          description: timerEvent.raw_text.trim()
+        })
+      }
       
       // Optional: Auto-save if a team is selected
       if (currentRun && selectedTeamIndex !== null) {
@@ -270,6 +284,8 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   // Shortcuts
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
       if (!currentRun) return
       switch (e.key) {
         case ' ':
@@ -306,13 +322,31 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
           break
         case 'Escape':
           e.preventDefault()
+          setIsFullscreen(false)
           handleCloseCapture()
+          break
+        case 'F5':
+          e.preventDefault()
+          setPenalty(prev => prev === '5' ? '0' : '5')
+          break
+        case 'F10':
+          e.preventDefault()
+          setPenalty(prev => prev === '10' ? '0' : '10')
           break
       }
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
   }, [currentRun, timerRunning, timerValue, penalty, noTime, dq])
+
+  // Auto-scroll the teams list to keep the active row visible
+  useEffect(() => {
+    if (selectedTeamIndex === null) return
+    const el = teamRowRefs.current.get(selectedTeamIndex)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [selectedTeamIndex])
 
   const formatTime = (ms: number) => {
     const m = Math.floor(ms / 60000)
@@ -322,37 +356,57 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   }
 
   const handleRoundChange = async (round: string) => {
-    setSelectedRound(round)
+    const roundNumber = parseInt(round)
+    const isFinalRound = roundNumber === totalRounds
+
+    // Reset selection state immediately
     setSelectedTeamIndex(null)
     handleReset()
-    
-    // Auto-generate/Regenerate logic
-    if (event?.id) {
-       try {
-          // Attempt to generate/regenerate the draw for this round automatically.
-          // The backend will block this if the round already has started (has completed runs), so it's safe to call.
-          // If it succeeds, we get a fresh draw without eliminated teams.
-          // If it fails (round started), we just catch the error and load what exists.
-          // Note: We only want to do this for rounds > 1 usually, but it's safe for R1 too if empty.
-          if (parseInt(round) > 1) {
-              const isFinalRound = parseInt(round) === totalRounds
-              await generateDraw({
-                  event_id: Number(event.id),
-                  round: parseInt(round),
-                  reseed: true,    // Always shuffle new rounds? Or maybe preserve order? User asked for fluid.
-                  seed_runs: true
-              })
-              if (isFinalRound) {
-                  toast.success(`Ronda final ${round} preparada. Los ropers se ordenaron de mayor a menor tiempo acumulado.`)
-              } else {
-                  toast.success(`Ronda ${round} preparada y filtrada.`)
-              }
-          }
-       } catch (e) {
-          // Ignore "round started" errors silently, as that just means we are viewing history
-          console.log('Auto-generation skipped:', e)
-       }
+
+    // For non-final rounds: the draw order is immutable (set once at batch generation).
+    // Just navigate — the useEffect will trigger fetchRuns with the correct data.
+    if (!event?.id || !isFinalRound) {
+      setSelectedRound(round)
+      return
     }
+
+    // ── Final round selected ──────────────────────────────────────────────────
+    // If the final round already exists in the BD (was previously generated), just navigate.
+    const finalRoundExists = allRuns.some(r => r.round === roundNumber)
+    if (finalRoundExists) {
+      setSelectedRound(round)
+      return
+    }
+
+    // Final round not yet generated: verify ALL previous rounds are fully captured.
+    const prevPendingRuns = allRuns.filter(
+      r => r.round < totalRounds && r.status === 'pending'
+    )
+    if (prevPendingRuns.length > 0) {
+      toast.warning(
+        `No se puede generar la ronda final aún: hay ${prevPendingRuns.length} run(s) pendiente(s) en rondas anteriores. Completa todos los runs primero.`
+      )
+      // Do not navigate — keep the user on the current round
+      return
+    }
+
+    // All previous rounds fully captured: generate final round ordered by accumulated time.
+    // setSelectedRound is called AFTER generateDraw so that fetchRuns (triggered by the state
+    // change) reads the BD only once it already contains the newly generated final round data.
+    try {
+      await generateDraw({
+        event_id: Number(event.id),
+        round: roundNumber,
+        reseed: false,
+        seed_runs: true,
+      })
+      toast.success(`Ronda final ${round} generada. Los equipos se ordenaron de mayor a menor tiempo acumulado.`)
+    } catch (e) {
+      console.error('Error generating final round:', e)
+      toast.error('Error al generar la ronda final: ' + String(e))
+    }
+    // Navigate regardless of success/failure (backend error means round may already exist)
+    setSelectedRound(round)
   }
 
   const handleSelectTeam = (index: number) => {
@@ -375,7 +429,22 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     }
   }
 
-  const handleStartStop = () => setTimerRunning((v) => !v)
+  const handleStartStop = () => {
+    setTimerRunning((running) => {
+      // Al detener el cronómetro, verificar si supera 15 segundos
+      if (running) {
+        const seconds = timerValue / 1000
+        if (seconds > 15) {
+          setNoTime(true)
+          setDq(false)
+          toast.warning(`NO TIME automático: ${seconds.toFixed(3)}s (límite 15s)`)
+        } else {
+          setNoTime(false)
+        }
+      }
+      return !running
+    })
+  }
 
   const handleReset = () => {
     setTimerRunning(false)
@@ -580,19 +649,49 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
 
   // removed handleRecaptureConfirm
 
-  const maxRoundsCompleted = globalStandings.reduce((max, standing) => {
-    return Math.max(max, standing.roundsCompleted || 0)
-  }, 0)
-  const standingsComplete = totalRounds > 0 && maxRoundsCompleted >= totalRounds
-  const standingsProgress = totalRounds > 0 ? Math.min((maxRoundsCompleted / totalRounds) * 100, 100) : 0
-  const nextRoundPointer = standingsComplete
-    ? totalRounds
-    : Math.max(1, Math.min(maxRoundsCompleted + 1, totalRounds))
+  const formatSignedSeconds = (value: number) => {
+    if (value === 0) return '0.00s'
+    const sign = value > 0 ? '+' : '-'
+    return `${sign}${Math.abs(value).toFixed(2)}s`
+  }
+
+  const currentRoundNumber = Number(selectedRound)
+  const currentRoundCompletedRuns = runs.filter((run) => run.status === 'completed').length
+  const overallCompletedRuns = allRuns.filter((run) => run.status === 'completed').length
+  const overallTotalRuns = allRuns.length
+  const standingsComplete = overallTotalRuns > 0 && overallCompletedRuns >= overallTotalRuns
+  const standingsProgress = overallTotalRuns > 0
+    ? Math.min((overallCompletedRuns / overallTotalRuns) * 100, 100)
+    : 0
+  const leaderTime = globalStandings.length > 0 ? globalStandings[0].totalTime : null
+  const currentRoundCompletedStandings = globalStandings.filter(
+    (standing) =>
+      standing.totalTime !== null &&
+      !standing.eliminatedRound &&
+      (standing.roundsCompleted || 0) >= currentRoundNumber,
+  )
+  const currentRoundLeaderTime = currentRoundCompletedStandings.reduce<number | null>((best, standing) => {
+    if (standing.totalTime === null) return best
+    if (best === null || standing.totalTime < best) return standing.totalTime
+    return best
+  }, null)
+  const currentTeamPriorTotal = currentRun
+    ? allRuns.reduce((sum, run) => {
+        if (run.teamId !== currentRun.teamId) return sum
+        if (run.round >= currentRun.round) return sum
+        if (run.status !== 'completed' || run.time === null || run.noTime || run.dq) return sum
+        return sum + run.time + run.penalty
+      }, 0)
+    : null
+  const currentRequiredRunToLead = currentRun && currentRoundLeaderTime !== null && currentTeamPriorTotal !== null
+    ? currentRoundLeaderTime - currentTeamPriorTotal - 0.001
+    : null
+  const isCompactView = !isFullscreen
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div className={`flex flex-col bg-background ${isFullscreen ? 'fixed inset-0 z-50 p-4' : 'flex-1 min-h-0'}`}>
       {/* Header - Minimalist, inside content area (since we are in a tab) */}
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
              <div className="flex items-center gap-2 bg-card border border-border rounded-xl p-1 px-3 shadow-sm">
                 <Label className="text-muted-foreground whitespace-nowrap">Ronda actual:</Label>
@@ -671,6 +770,13 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                 </Badge>
              )}
         </div>
+        <button
+          onClick={() => setIsFullscreen(f => !f)}
+          className="ml-2 flex items-center justify-center w-8 h-8 rounded-lg border border-border bg-card text-muted-foreground hover:bg-muted transition-colors flex-shrink-0"
+          title={isFullscreen ? 'Salir de pantalla completa' : 'Pantalla completa'}
+        >
+          {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+        </button>
       </div>
 
       {/* Timer Settings Panel */}
@@ -742,9 +848,9 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
         </div>
       )}
 
-      <div className="flex-1 flex gap-6 overflow-hidden min-h-0">
+      <div className="flex-1 h-full flex gap-6 overflow-hidden min-h-0">
         {/* LEFT: Teams list */}
-        <div className="w-96 bg-card border border-border rounded-xl flex flex-col overflow-hidden shadow-sm">
+        <div className="w-96 h-full min-h-0 bg-card border border-border rounded-xl flex flex-col overflow-hidden shadow-sm">
           <div className="p-4 border-b border-border bg-muted/30">
             <h3 className="text-foreground font-medium flex items-center gap-2">
                 <Users className="h-4 w-4 text-muted-foreground" />
@@ -752,7 +858,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
             </h3>
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 h-0 min-h-0 overflow-hidden [&>div]:h-full [&>div]:overflow-y-auto">
             <Table>
                 <TableHeader className="sticky top-0 bg-card z-10">
                   <TableRow className="hover:bg-card border-b border-border">
@@ -768,6 +874,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                   const cumulative = cumulativeTotals[run.teamId]
                   return (
                     <TableRow
+                      ref={(el) => { if (el) teamRowRefs.current.set(index, el); else teamRowRefs.current.delete(index) }}
                       key={run.id}
                       className={`cursor-pointer transition-colors ${
                         index === selectedTeamIndex ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-muted/50'
@@ -861,239 +968,222 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
         </div>
 
         {/* RIGHT: Capture + Results */}
-        <div className="flex-1 flex flex-col gap-6 overflow-y-auto min-h-0 pr-1">
-          
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0 gap-4">
+
+          {/* Upper: Capture panel (+ stats in fullscreen) */}
+          <div className={`${isFullscreen ? 'flex-shrink-0 overflow-y-auto max-h-[50%]' : 'flex-1 min-h-0'} flex flex-col gap-4`}>
+
           {/* Capture Panel */}
           {currentRun ? (
-            <div className="bg-card rounded-xl border border-border p-6 shadow-sm animate-in slide-in-from-bottom-2 duration-300">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                    <div className="flex items-center gap-2 mb-2">
-                        <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20">
-                            Ronda {currentRun.round}
-                        </Badge>
-                        <Badge variant="secondary" className="text-muted-foreground">
-                            Run #{currentRun.position}
-                        </Badge>
-                    </div>
-                    <h2 className="text-2xl font-semibold text-foreground tracking-tight">
-                        {currentRun.team.header} <span className="text-muted-foreground text-lg font-normal">&</span> {currentRun.team.heeler}
-                    </h2>
-                </div>
-                <Button variant="ghost" size="icon" onClick={handleCloseCapture} className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-full">
-                  <X className="w-5 h-5" />
-                </Button>
-              </div>
+            <div className={`bg-card rounded-xl border border-border shadow-sm animate-in slide-in-from-bottom-2 duration-300 overflow-hidden ${isCompactView ? 'flex-1 min-h-0' : ''}`}>
 
-              {/* Mode Toggle */}
-              <div className="flex items-center justify-center gap-3 mb-6 p-4 bg-muted/30 rounded-xl border border-border/50">
+              {/* Header: badges + team name + mode toggle + close */}
+              <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20">
+                    Ronda {currentRun.round}
+                  </Badge>
+                  <Badge variant="secondary" className="text-muted-foreground">
+                    Run #{currentRun.position}
+                  </Badge>
+                </div>
+                <h2 className="flex-1 text-base font-semibold text-foreground tracking-tight truncate">
+                  {currentRun.team.header} <span className="text-muted-foreground font-normal">&</span> {currentRun.team.heeler}
+                </h2>
+                {/* Mode toggle inline */}
                 {captureMode === 'manual' && (
-                  <>
-                    <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
-                      !isManualMode ? 'text-foreground' : 'text-muted-foreground'
-                    }`}>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <Label htmlFor="mode-switch" className={`text-sm font-medium transition-colors ${!isManualMode ? 'text-foreground' : 'text-muted-foreground'}`}>
                       Cronómetro
                     </Label>
                     <Switch
                       id="mode-switch"
                       checked={isManualMode}
-                      onCheckedChange={(checked) => {
-                        setIsManualMode(checked)
-                        handleReset()
-                      }}
+                      onCheckedChange={(checked) => { setIsManualMode(checked); handleReset() }}
                     />
-                    <Label htmlFor="mode-switch" className={`font-medium transition-colors ${
-                      isManualMode ? 'text-foreground' : 'text-muted-foreground'
-                    }`}>
-                      Entrada Manual
+                    <Label htmlFor="mode-switch" className={`text-sm font-medium transition-colors ${isManualMode ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      Manual
                     </Label>
-                  </>
+                  </div>
                 )}
                 {captureMode === 'external' && (
-                  <div className="flex items-center gap-2">
-                    <Timer className="h-5 w-5 text-primary" />
-                    <span className="font-medium text-foreground">
-                      {timerConnected ? 'Esperando tiempo del Timer Polaris...' : 'Timer no conectado'}
-                    </span>
+                  <div className="flex items-center gap-1.5 text-sm text-muted-foreground flex-shrink-0">
+                    <Timer className="h-4 w-4 text-primary" />
+                    <span>{timerConnected ? 'Esperando Polaris...' : 'Timer no conectado'}</span>
                   </div>
                 )}
+                <Button variant="ghost" size="icon" onClick={handleCloseCapture} className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive rounded-full flex-shrink-0 h-8 w-8">
+                  <X className="w-4 h-4" />
+                </Button>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                  {/* Timer Display or Manual Input */}
+              {/* Timer + Buttons side by side */}
+              <div className="flex gap-3 p-3 border-b border-border">
+                {/* Timer display */}
+                {captureMode === 'manual' && !isManualMode ? (
+                  <div className="flex-1 bg-foreground rounded-xl flex flex-col items-center justify-center py-4 shadow-inner relative overflow-hidden">
+                    <div className="absolute top-2 left-0 right-0 flex justify-center opacity-40">
+                      <span className="flex items-center gap-1.5 text-background/60 text-[10px] font-mono uppercase tracking-widest">
+                        <Clock className="w-2.5 h-2.5" /> Cronómetro
+                      </span>
+                    </div>
+                    <div className="text-[38px] font-mono font-bold text-primary tracking-tighter tabular-nums">
+                      {formatTime(timerValue)}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1 bg-foreground rounded-xl flex flex-col items-center justify-center py-4 shadow-inner relative overflow-hidden">
+                    <div className="absolute top-2 left-0 right-0 flex justify-center opacity-40">
+                      <span className="flex items-center gap-1.5 text-background/60 text-[10px] font-mono uppercase tracking-widest">
+                        <Clock className="w-2.5 h-2.5" /> {captureMode === 'external' ? 'Timer Externo' : 'Entrada Manual'}
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      step="0.001"
+                      value={manualTimeInput}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setManualTimeInput(val)
+                        const parsed = parseFloat(val)
+                        if (!isNaN(parsed) && parsed > 15) {
+                          setNoTime(true); setDq(false)
+                          toast.warning(`NO TIME automático: ${parsed.toFixed(3)}s (límite 15s)`)
+                        } else if (!isNaN(parsed) && parsed > 0) {
+                          setNoTime(false)
+                        }
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveRun() } }}
+                      placeholder="0.000"
+                      readOnly={captureMode === 'external'}
+                      className="text-[38px] font-mono font-bold text-center border-none bg-transparent text-primary tracking-tighter tabular-nums outline-none w-full [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <p className="text-background/50 text-[10px] font-mono uppercase tracking-widest mt-1">
+                      {captureMode === 'external' ? 'Capturado desde Polaris' : 'segundos'}
+                    </p>
+                  </div>
+                )}
+
+                {/* Action buttons column */}
+                <div className="flex flex-col gap-2 w-44">
                   {captureMode === 'manual' && !isManualMode ? (
-                    <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden group">
-                        <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
-                          <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
-                              <Clock className="w-3 h-3" /> Cronómetro
-                          </div>
-                        </div>
-                        
-                        <div className="text-5xl lg:text-7xl font-mono font-bold text-primary tracking-tighter tabular-nums z-10 selection:bg-primary selection:text-primary-foreground">
-                          {formatTime(timerValue)}
-                        </div>
-                    </div>
+                    <>
+                      <Button
+                        onClick={handleStartStop}
+                        className={`flex-1 text-base font-medium rounded-xl shadow-sm transition-all duration-200 active:scale-[0.98] ${
+                          timerRunning
+                            ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'
+                            : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                        }`}
+                      >
+                        {timerRunning ? (
+                          <span className="flex items-center gap-2"><Pause className="w-5 h-5 fill-current" /> Pausar</span>
+                        ) : (
+                          <span className="flex items-center gap-2"><Play className="w-5 h-5 fill-current" /> Iniciar</span>
+                        )}
+                      </Button>
+                      <Button onClick={handleReset} variant="outline" className="flex-1 text-sm border-border hover:bg-accent rounded-xl">
+                        <RotateCcw className="w-4 h-4 mr-2" /> Reiniciar
+                      </Button>
+                    </>
                   ) : (
-                    <div className="bg-foreground rounded-2xl p-8 flex flex-col items-center justify-center shadow-inner relative overflow-hidden min-h-[200px]">
-                        <div className="absolute top-4 left-0 right-0 flex justify-center opacity-50">
-                          <div className="flex items-center gap-2 text-background/60 text-xs font-mono uppercase tracking-widest">
-                              <Clock className="w-3 h-3" /> {captureMode === 'external' ? 'Timer Externo' : 'Entrada Manual'}
-                          </div>
-                        </div>
-                        
-                        <div className="w-full flex flex-col items-center justify-center z-10 px-4">
-                          <input
-                            type="number"
-                            step="0.001"
-                            value={manualTimeInput}
-                            onChange={(e) => setManualTimeInput(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault()
-                                handleSaveRun()
-                              }
-                            }}
-                            placeholder="0.000"
-                            readOnly={captureMode === 'external'}
-                            className="text-5xl lg:text-6xl font-mono font-bold text-center border-none bg-transparent text-primary tracking-tighter tabular-nums outline-none w-full [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                          />
-                          <p className="text-center text-background/60 text-xs font-mono mt-3 uppercase tracking-widest">
-                            {captureMode === 'external' ? 'Capturado desde Polaris' : 'segundos'}
-                          </p>
-                        </div>
-                    </div>
+                    <>
+                      <Button onClick={handleReset} variant="outline" className="flex-1 text-sm border-border hover:bg-accent rounded-xl">
+                        <RotateCcw className="w-4 h-4 mr-2" /> Limpiar
+                      </Button>
+                      <div className="flex-1 flex items-center p-2 bg-muted/50 rounded-xl border border-border/50 text-xs text-muted-foreground">
+                        Formato: segundos con hasta 3 decimales (ej: 8.456)
+                      </div>
+                    </>
                   )}
-
-                   {/* Controls */}
-                   {captureMode === 'manual' && !isManualMode ? (
-                     <div className="flex flex-col justify-center gap-4">
-                          <Button
-                              onClick={handleStartStop}
-                              className={`h-20 text-xl font-medium rounded-2xl shadow-sm transition-all duration-200 transform active:scale-[0.98] ${
-                              timerRunning 
-                                  ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground ring-4 ring-destructive/10' 
-                                  : 'bg-emerald-600 hover:bg-emerald-700 text-white ring-4 ring-emerald-600/10'
-                              }`}
-                          >
-                              {timerRunning ? (
-                              <span className="flex items-center gap-3">
-                                  <Pause className="w-8 h-8 fill-current" /> Pausar
-                              </span>
-                              ) : (
-                              <span className="flex items-center gap-3">
-                                  <Play className="w-8 h-8 fill-current" /> Iniciar
-                              </span>
-                              )}
-                          </Button>
-                          
-                          <Button onClick={handleReset} variant="outline" className="h-14 text-base border-border hover:bg-accent hover:text-accent-foreground rounded-xl">
-                              <RotateCcw className="w-5 h-5 mr-2 group-hover:rotate-180 transition-transform duration-500" />
-                              Reiniciar (Reset)
-                          </Button>
-                     </div>
-                   ) : (
-                     <div className="flex flex-col justify-center gap-4">
-                          <Button onClick={handleReset} variant="outline" className="h-14 text-base border-border hover:bg-accent hover:text-accent-foreground rounded-xl">
-                              <RotateCcw className="w-5 h-5 mr-2" />
-                              Limpiar
-                          </Button>
-                          <div className="p-4 bg-muted/50 rounded-xl border border-border/50 text-sm text-muted-foreground">
-                            <p className="font-medium mb-1">Ingresa el tiempo manualmente</p>
-                            <p className="text-xs">Formato: segundos con hasta 3 decimales (ej: 8.456)</p>
-                          </div>
-                     </div>
-                   )}
+                </div>
               </div>
 
-              {/* Validation Inputs */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-6 bg-muted/30 rounded-xl border border-border/50">
-                  <div className="space-y-2">
-                    <Label htmlFor="penalty" className="text-foreground font-medium">Penalización (s)</Label>
-                    <div className="relative flex items-center">
-                        <Input
-                          id="penalty"
-                          type="number"
-                          step="1"
-                          value={penalty}
-                          onChange={(e) => setPenalty(e.target.value)}
-                          placeholder="0"
-                          className="bg-background border-border h-12 text-lg font-mono text-center pr-12 appearance-none"
-                          style={{ MozAppearance: 'textfield' }}
-                        />
-                        <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-muted-foreground text-sm font-medium">sec</span>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center p-3 bg-background border border-border rounded-xl">
-                     <Checkbox
-                      id="noTime"
-                      checked={noTime}
-                      onCheckedChange={(c) => {
-                        const v = !!c
-                        setNoTime(v)
-                        if (v) setDq(false)
-                      }}
-                      className="w-5 h-5"
-                    />
-                    <Label htmlFor="noTime" className="cursor-pointer ml-3 flex-1 font-medium">NT (No Time)</Label>
-                  </div>
-
-                  <div className="flex items-center p-3 bg-background border border-border rounded-xl">
-                    <Checkbox
-                      id="dq"
-                      checked={dq}
-                      onCheckedChange={(c) => {
-                        const v = !!c
-                        setDq(v)
-                        if (v) setNoTime(false)
-                      }}
-                      className="w-5 h-5"
-                    />
-                    <Label htmlFor="dq" className="cursor-pointer ml-3 flex-1 font-medium">DQ (Descalificado)</Label>
-                  </div>
+              {/* Penalties + flags */}
+              <div className="flex items-center gap-3 px-4 py-2 border-b border-border flex-wrap">
+                <span className="text-xs font-medium text-muted-foreground flex-shrink-0">Penalización</span>
+                <Button
+                  type="button"
+                  onClick={() => setPenalty(prev => prev === '5' ? '0' : '5')}
+                  variant="ghost"
+                  className={`h-8 px-3 text-sm font-semibold rounded-xl transition-all focus-visible:ring-0 focus-visible:outline-none ${
+                    penalty === '5'
+                      ? 'bg-primary hover:bg-primary/90 !text-white hover:!text-white shadow-sm'
+                      : 'bg-background border border-border text-foreground'
+                  }`}
+                >
+                  +5s <span className="ml-1 text-[10px] opacity-60 font-normal">F5</span>
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => setPenalty(prev => prev === '10' ? '0' : '10')}
+                  variant="ghost"
+                  className={`h-8 px-3 text-sm font-semibold rounded-xl transition-all focus-visible:ring-0 focus-visible:outline-none ${
+                    penalty === '10'
+                      ? 'bg-primary hover:bg-primary/90 !text-white hover:!text-white shadow-sm'
+                      : 'bg-background border border-border text-foreground'
+                  }`}
+                >
+                  +10s <span className="ml-1 text-[10px] opacity-60 font-normal">F10</span>
+                </Button>
+                <div className="w-px h-5 bg-border flex-shrink-0" />
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="noTime"
+                    checked={noTime}
+                    onCheckedChange={(c) => { const v = !!c; setNoTime(v); if (v) setDq(false) }}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="noTime" className="cursor-pointer text-sm font-medium">NT (No time)</Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="dq"
+                    checked={dq}
+                    onCheckedChange={(c) => { const v = !!c; setDq(v); if (v) setNoTime(false) }}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="dq" className="cursor-pointer text-sm font-medium">DQ</Label>
+                </div>
               </div>
 
               {/* Navigation Actions */}
-              <div className="flex gap-3 mt-6">
+              <div className="flex gap-3 p-3">
                 <Button
                   onClick={handlePrevious}
                   disabled={selectedTeamIndex === 0}
                   variant="outline"
-                  className="w-32 rounded-xl h-12 border-border"
+                  className="w-28 rounded-xl h-10 border-border text-sm"
                 >
-                  <ChevronLeft className="w-4 h-4 mr-2" />
-                  Anterior
+                  <ChevronLeft className="w-4 h-4 mr-1" /> Anterior
                 </Button>
-                
-                <Button onClick={handleSaveRun} className="flex-1 h-12 rounded-xl text-lg font-medium shadow-md bg-primary text-primary-foreground hover:opacity-90">
-                  <Save className="w-5 h-5 mr-2" />
-                  Guardar Resultado
+                <Button onClick={handleSaveRun} className="flex-1 h-10 rounded-xl text-base font-medium shadow-md bg-primary text-primary-foreground hover:opacity-90">
+                  <Save className="w-4 h-4 mr-2" /> Guardar Resultado
                 </Button>
-                
                 <Button
                   onClick={handleNext}
                   disabled={selectedTeamIndex === runs.length - 1}
                   variant="outline"
-                  className="w-32 rounded-xl h-12 border-border"
+                  className="w-28 rounded-xl h-10 border-border text-sm"
                 >
-                  Siguiente
-                  <ChevronRight className="w-4 h-4 ml-2" />
+                  Siguiente <ChevronRight className="w-4 h-4 ml-1" />
                 </Button>
               </div>
             </div>
           ) : (
-            <div className="bg-card rounded-xl border border-dashed border-border p-12 flex flex-col items-center justify-center h-[500px] shadow-sm text-center">
-              <div className="w-20 h-20 bg-muted rounded-full flex items-center justify-center mb-6">
-                 <Clock className="w-10 h-10 text-muted-foreground/50" />
+            <div className={`bg-card rounded-xl border border-dashed border-border p-6 flex flex-col items-center justify-center shadow-sm text-center ${isCompactView ? 'flex-1 min-h-0' : 'min-h-[140px]'}`}>
+              <div className="w-14 h-14 bg-muted rounded-full flex items-center justify-center mb-3">
+                 <Clock className="w-7 h-7 text-muted-foreground/50" />
               </div>
-              <h3 className="text-xl font-semibold text-foreground mb-2">Listo para capturar</h3>
-              <p className="text-muted-foreground max-w-sm mx-auto">
+              <h3 className="text-lg font-semibold text-foreground mb-1">Listo para capturar</h3>
+              <p className="text-sm text-muted-foreground max-w-sm mx-auto">
                 Selecciona un equipo de la lista de la izquierda para comenzar el cronometraje y registro de tiempos.
               </p>
             </div>
           )}
           
           {/* Stats Bar */}
+          {isFullscreen && (
           <div className="grid grid-cols-3 gap-4">
                <div className="bg-card p-4 rounded-xl border border-border shadow-sm flex flex-col gap-1">
                    <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-2">
@@ -1125,28 +1215,53 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                    </span>
                </div>
           </div>
+          )}
+          </div>{/* end upper: capture + stats */}
 
+          {/* Lower: Results — fullscreen only */}
+          {isFullscreen && (
+          <div className="flex flex-col">
           {/* Results Tabs */}
-          <div className="bg-card rounded-xl border border-border shadow-sm flex-1 flex flex-col overflow-hidden min-h-[400px]">
-             <Tabs defaultValue="round" className="flex flex-col h-full">
-            <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-muted/10">
+          <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col overflow-hidden">
+             <Tabs defaultValue="round" className="flex flex-col">
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-muted/10 flex-shrink-0">
               <h3 className="font-semibold text-foreground">Resultados</h3>
-              <TabsList className="bg-muted">
-                <TabsTrigger value="round" className="data-[state=active]:bg-background data-[state=active]:shadow-sm">Ronda actual</TabsTrigger>
-                <TabsTrigger value="global" className="data-[state=active]:bg-background data-[state=active]:shadow-sm">Standings globales</TabsTrigger>
-              </TabsList>
+              <div className="flex items-center gap-3">
+                <TabsList className="bg-muted">
+                  <TabsTrigger value="round" className="data-[state=active]:bg-background data-[state=active]:shadow-sm">Ronda actual</TabsTrigger>
+                  <TabsTrigger value="global" className="data-[state=active]:bg-background data-[state=active]:shadow-sm">Standings globales</TabsTrigger>
+                </TabsList>
+                <div className="relative flex-shrink-0">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50" />
+                  <Input
+                    placeholder="Buscar equipo..."
+                    value={globalSearchQuery}
+                    onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                    className="pl-8 h-9 w-52 text-sm bg-background border-border/60 rounded-xl focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+              </div>
             </div>
 
-            <TabsContent value="round" className="flex-1 overflow-auto p-0 m-0">
-              <Table>
+            <TabsContent value="round" className="overflow-hidden flex flex-col p-0 m-0">
+              <div className="max-h-[34vh] overflow-y-auto">
+              <Table className="table-fixed w-full">
+                <colgroup>
+                  <col style={{width:'5%'}} />
+                  <col style={{width:'36%'}} />
+                  <col style={{width:'14%'}} />
+                  <col style={{width:'12%'}} />
+                  <col style={{width:'14%'}} />
+                  <col style={{width:'19%'}} />
+                </colgroup>
                 <TableHeader className="sticky top-0 bg-card z-10 shadow-sm">
                   <TableRow className="hover:bg-card border-b border-border bg-muted/20">
-                    <TableHead className="text-foreground w-16 font-medium text-center">Pos</TableHead>
+                    <TableHead className="text-foreground font-medium text-center">Pos</TableHead>
                     <TableHead className="text-foreground font-medium">Equipo</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Tiempo</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Penal</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Total</TableHead>
-                    <TableHead className="text-foreground w-24 text-center font-medium">Estado</TableHead>
+                    <TableHead className="text-foreground text-center font-medium">Estado</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1206,42 +1321,108 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                   )}
                 </TableBody>
               </Table>
+              </div>
             </TabsContent>
 
-            <TabsContent value="global" className="flex-1 overflow-auto p-0 m-0">
-              <div className="px-6 pt-6 pb-4 border-b border-border bg-muted/10">
-                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
-                  <div>
-                    <p className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Estado global</p>
-                    <div className="flex items-center gap-3 text-sm">
-                      <span className={`font-semibold ${standingsComplete ? 'text-emerald-600' : 'text-primary'}`}>
-                        {standingsComplete ? 'Completado' : 'En curso'}
-                      </span>
-                      <span className="text-muted-foreground">
-                        Ronda {nextRoundPointer} / {totalRounds}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {standingsComplete
-                      ? 'Todas las rondas han sido capturadas.'
-                      : 'Resultados se actualizan conforme se capturan nuevas rondas.'}
-                  </div>
+            <TabsContent value="global" className="overflow-hidden flex flex-col p-0 m-0">
+              {/* ── Summary bar (single row) ── */}
+              <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-border flex-wrap">
+                {/* Status badge */}
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap flex-shrink-0 ${
+                  standingsComplete
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-primary/10 text-primary border border-primary/20'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${standingsComplete ? 'bg-emerald-500' : 'bg-primary'}`} />
+                  {standingsComplete ? 'Completado' : 'En curso'}
+                </span>
+                <span className="text-xs font-semibold text-foreground tabular-nums whitespace-nowrap">
+                  {Math.round(standingsProgress)}%
+                </span>
+                <div className="w-20 h-[3px] bg-muted rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${
+                      standingsComplete ? 'bg-emerald-500' : 'bg-primary'
+                    }`}
+                    style={{ width: `${Math.round(standingsProgress)}%` }}
+                  />
                 </div>
-                <Progress value={standingsProgress} className="h-2 bg-muted" indicatorClassName="bg-emerald-500" />
+                <span className="text-xs font-medium text-foreground whitespace-nowrap">
+                  Ronda <strong>{currentRoundNumber}</strong> de {totalRounds}
+                </span>
+                <span className="text-border">·</span>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  Equipos <strong className="text-foreground">{globalStandings.length}</strong>
+                </span>
+                <span className="text-border">·</span>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  Runs <strong className="text-foreground">{currentRoundCompletedRuns}</strong>
+                </span>
+                {globalStandings.length > 0 && globalStandings[0].totalTime !== null && (
+                  <>
+                    <span className="text-border">·</span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      Líder{' '}
+                      <strong className="text-primary">
+                        {globalStandings[0].team.header} ({globalStandings[0].totalTime.toFixed(2)}s)
+                      </strong>
+                    </span>
+                    {currentRun && !noTime && !dq && (
+                      <>
+                        <span className="text-border">·</span>
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
+                          Equipo actual{' '}
+                          <strong className="text-primary">
+                            {currentRun.team.header} & {currentRun.team.heeler}
+                          </strong>{' '}
+                          {currentRoundLeaderTime === null ? (
+                            <strong className="text-muted-foreground">esperando primer run de la ronda</strong>
+                          ) : currentRequiredRunToLead !== null && currentRequiredRunToLead <= 0 ? (
+                            <strong className="text-rose-600">ya no alcanza al líder</strong>
+                          ) : (
+                            <>
+                              necesita{' '}
+                              <strong className="text-primary">
+                                {currentRequiredRunToLead?.toFixed(3)}s
+                              </strong>
+                            </>
+                          )}
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
-               <Table>
+              <div className="max-h-[34vh] overflow-y-auto">
+               <Table className="table-fixed">
+                <colgroup>
+                  <col className="w-10" />
+                  <col className="w-[35%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[15%]" />
+                  <col className="w-[15%]" />
+                  <col className="w-[18%]" />
+                </colgroup>
                 <TableHeader className="sticky top-0 bg-card z-10 shadow-sm">
                   <TableRow className="hover:bg-card border-b border-border bg-muted/20">
-                    <TableHead className="text-foreground w-16 font-medium text-center">Pos</TableHead>
+                    <TableHead className="text-foreground font-medium text-center">Pos</TableHead>
                     <TableHead className="text-foreground font-medium">Equipo</TableHead>
                     <TableHead className="text-foreground text-center font-medium">Runs</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Total</TableHead>
                     <TableHead className="text-foreground text-right font-medium">Promedio</TableHead>
+                    <TableHead className="text-foreground text-right font-medium">vs Líder</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {globalStandings.map((s) => (
+                  {globalStandings.filter((s) => {
+                    if (!globalSearchQuery) return true
+                    const q = globalSearchQuery.toLowerCase()
+                    return (
+                      String(s.team.id).includes(q) ||
+                      s.team.header.toLowerCase().includes(q) ||
+                      s.team.heeler.toLowerCase().includes(q)
+                    )
+                  }).map((s) => (
                     <TableRow key={s.team.id} className="hover:bg-muted/30 border-b border-border/50 last:border-0">
                       <TableCell className="text-center">
                          <Badge variant="outline" className="w-8 h-8 rounded-full p-0 flex items-center justify-center border-border">
@@ -1269,15 +1450,31 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                       <TableCell className="text-right font-mono text-foreground/80">
                         {s.average !== null ? s.average.toFixed(2) + 's' : '—'}
                       </TableCell>
+                      <TableCell className="text-right">
+                        {s.position === 1 ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                            Líder
+                          </span>
+                        ) : leaderTime !== null && s.totalTime !== null && !s.eliminatedRound ? (
+                          <span className="font-mono text-sm font-medium text-rose-500">
+                            {formatSignedSeconds(s.totalTime - leaderTime)}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </TabsContent>
           </Tabs>
+          </div>{/* end Results card */}
           </div>
-        </div>
-      </div>
+          )}
+        </div>{/* end RIGHT column */}
+      </div>{/* end main content area */}
 
       {/* Alert Dialog for Overwrite/PIN */}
       <AlertDialog open={isConfirmOpen} onOpenChange={setIsConfirmOpen}>

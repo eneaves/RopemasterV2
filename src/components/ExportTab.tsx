@@ -105,7 +105,7 @@ export function ExportTab({ event, series }: ExportTabProps) {
   const selectedCount = Object.values(selectedSheets).filter(Boolean).length
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-4">
       {/* Header */}
       <div>
         <h2 className="text-foreground mb-1">Export Event</h2>

@@ -1,18 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Shuffle, CheckCircle, AlertTriangle, Eye } from 'lucide-react'
+import { Shuffle, CheckCircle } from 'lucide-react'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
-import { Checkbox } from './ui/checkbox'
 import { Badge } from './ui/badge'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from './ui/table'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
-} from './ui/dialog'
 import { toast } from 'sonner'
-import { getRunsExpanded, generateDrawBatch, generateDraw } from '../lib/api'
+import { getRunsExpanded, generateDrawBatch } from '../lib/api'
 
 interface DrawTabProps {
   event: any
@@ -30,10 +26,8 @@ interface DrawEntry {
 
 export function DrawTab({ event, isLocked }: DrawTabProps) {
   const [rounds, setRounds] = useState<string>(String(event?.rounds ?? 3))
-  const [autoBalance, setAutoBalance] = useState(true)
   const [drawGenerated, setDrawGenerated] = useState(false)
   const [drawEntries, setDrawEntries] = useState<DrawEntry[]>([])
-  const [showExclusionsModal, setShowExclusionsModal] = useState(false)
   const [loading, setLoading] = useState(false)
   const [viewRound, setViewRound] = useState<number | 'all'>('all')
 
@@ -75,7 +69,7 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
       await generateDrawBatch({
         event_id: Number(event.id),
         rounds: numRounds,
-        shuffle: autoBalance
+        shuffle: true,
       })
       if (numRounds > 1) {
         toast.success(`¡Rondas 1 a ${numRounds - 1} generadas! La ronda ${numRounds} (final) debe generarse después de completar las rondas anteriores.`)
@@ -91,36 +85,6 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
     }
   }
 
-  const handleGenerateRound = async (roundNumber: number) => {
-    if (!event?.id) return
-    setLoading(true)
-    try {
-      const numRounds = parseInt(rounds) || 3
-      const isFinalRound = roundNumber === numRounds
-      
-      // Si es una ronda > 1, es crítico que la anterior esté "completa" en teoría, 
-      // pero el usuario sabe lo que hace. El backend filtrará los eliminados.
-      await generateDraw({
-        event_id: Number(event.id),
-        round: roundNumber,
-        reseed: autoBalance,
-        seed_runs: true
-      })
-      
-      if (isFinalRound) {
-        toast.success(`¡Ronda final ${roundNumber} generada! Los ropers se ordenaron de mayor a menor tiempo acumulado.`)
-      } else {
-        toast.success(`¡Ronda ${roundNumber} generada! Se han excluido equipos eliminados.`)
-      }
-      await fetchDraw()
-    } catch (error) {
-      console.error(`Error generating round ${roundNumber}:`, error)
-      toast.error(`Error: ` + String(error))
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const entriesByRound = drawEntries.reduce((acc, curr) => {
     if (!acc[curr.round]) acc[curr.round] = []
     acc[curr.round].push(curr)
@@ -129,9 +93,9 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
 
   const numRoundsConfig = parseInt(rounds) || 3
   const roundList = Array.from({length: numRoundsConfig}, (_, i) => i + 1)
+  const generatedRounds = Object.keys(entriesByRound).length
   
   const teamsIncluded = drawEntries.length ? new Set(drawEntries.map(d => d.teamId)).size : 0
-  const teamsExcluded = 0
   const spacingPercent = 95
 
   return (
@@ -159,33 +123,20 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                 className="bg-muted border-border"
               />
             </div>
-             <div className="flex items-center space-x-2 pb-3">
-                <Checkbox
-                  id="autoBalance"
-                  checked={autoBalance}
-                  onCheckedChange={(checked) => setAutoBalance(!!checked)}
-                  disabled={isLocked || loading}
-                />
-                <Label htmlFor="autoBalance" className="cursor-pointer text-foreground">
-                  Barajar y Espaciar (Shuffle)
-                </Label>
-              </div>
-              
-              <div className="flex-1" />
-              
-              {/* Opción de generar todo de golpe si no hay nada generado */}
-              {!drawGenerated && !isLocked && (
-                <Button 
-                   variant="outline"
-                   onClick={handleGenerateBatch}
-                   disabled={loading}
-                   className="border-primary text-primary hover:bg-primary/10"
-                   title="Genera todas las rondas excepto la última. La última ronda debe generarse después para ordenar por tiempos acumulados."
-                >
-                   <Shuffle className="w-4 h-4 mr-2" />
-                   Generar Rondas Iniciales (N-1)
-                </Button>
-              )}
+            <div className="flex-1" />
+
+            {!drawGenerated && !isLocked && (
+              <Button
+                variant="outline"
+                onClick={handleGenerateBatch}
+                disabled={loading}
+                className="border-primary text-primary hover:bg-primary/10"
+                title="Genera las rondas iniciales. La ronda final se generará cuando se completen los runs anteriores."
+              >
+                <Shuffle className="w-4 h-4 mr-2" />
+                Generar Rondas
+              </Button>
+            )}
          </div>
       </div>
 
@@ -193,17 +144,9 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {roundList.map(r => {
              const exists = entriesByRound[r] && entriesByRound[r].length > 0
-             const prevRoundExists = r === 1 ? true : (entriesByRound[r-1] && entriesByRound[r-1].length > 0)
              const count = exists ? entriesByRound[r].length : 0
              const isFinalRound = r === numRoundsConfig
-             
-             // Check if THIS specific round has any run captured/completed
-             // Ignoramos 'skipped' para que no bloquee la regeneración (ya que son eliminados automáticos)
              const roundStarted = exists && entriesByRound[r].some(e => e.status === 'completed')
-             
-             // We allow generation if it doesn't exist, previous exists
-             const canGenerate = !exists && prevRoundExists
-             const canRegenerate = exists && !roundStarted
 
              return (
                <div key={r} className={`rounded-xl border p-4 ${exists ? 'bg-card border-border' : 'bg-muted/30 border-dashed border-border'}`}>
@@ -224,54 +167,25 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                         <div className="text-xs text-emerald-600 font-medium flex items-center gap-1">
                            <CheckCircle className="w-3 h-3" /> GENERADA {roundStarted ? '(Iniciada)' : ''}
                         </div>
-                        {canRegenerate && (
-                           <Button 
-                              variant="outline" 
-                              size="sm" 
-                              className="w-full text-xs border-dashed border-red-200 text-red-700 hover:bg-red-50 hover:border-red-300"
-                              disabled={loading}
-                              onClick={() => {
-                                  const msg = isFinalRound 
-                                     ? `¿Regenerar Ronda Final ${r}? Los ropers se ordenarán de mayor a menor tiempo acumulado.`
-                                     : `¿Regenerar Ronda ${r}? Esto borrará los tiempos actuales de esta ronda y excluirá equipos eliminados en rondas previas.`
-                                  if(window.confirm(msg)) {
-                                      handleGenerateRound(r)
-                                  }
-                              }}
-                           >
-                              Regenerar Draw
-                           </Button>
-                        )}
-                        <Button
-                           variant={viewRound === r ? "secondary" : "ghost"}
-                           size="sm"
-                           className="w-full text-xs h-7"
-                           onClick={() => setViewRound(viewRound === r ? 'all' : r)}
-                        >
-                           {viewRound === r ? 'Ver Todos' : 'Ver Lista'}
-                        </Button>
-                     </div>
+                        <p className="text-xs text-muted-foreground">
+                          {isFinalRound
+                            ? 'Ordenada por tiempos acumulados.'
+                            : 'Incluida en la generación inicial.'}
+                        </p>
+                  </div>
+                  ) : isFinalRound ? (
+                    <p className="text-xs text-orange-500 mt-2">
+                      Esta ronda se generará cuando haya completado todos los runs anteriores.
+                    </p>
                   ) : (
-                     <Button 
-                        size="sm" 
-                        className="w-full mt-2"
-                        disabled={!canGenerate || loading}
-                        onClick={() => handleGenerateRound(r)}
-                        title={isFinalRound ? "Se ordenará de mayor a menor tiempo acumulado" : ""}
-                     >
-                        {loading ? 'Generando...' : `Generar Draw Ronda ${r}`}
-                     </Button>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Se generará con el botón principal.
+                    </p>
                   )}
-                  
-                  {!exists && !prevRoundExists && r > 1 && (
-                     <p className="text-xs text-orange-500 mt-2">
-                        {isFinalRound ? 'Completa las rondas anteriores y la ronda final se ordenará por tiempos acumulados.' : 'Completa la ronda anterior primero.'}
-                     </p>
-                  )}
-                  
+
                   {roundStarted && (
                      <p className="text-xs text-muted-foreground mt-2 italic">
-                        No se puede regenerar porque ya hay tiempos capturados.
+                        Ya hay tiempos capturados en esta ronda.
                      </p>
                   )}
                </div>
@@ -288,7 +202,7 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                 <CheckCircle className="w-5 h-5 text-foreground" />
                 <h3 className="text-foreground">Rounds Created</h3>
               </div>
-              <p className="text-3xl text-foreground">{event?.rounds ?? (Number(rounds) || 0)}</p>
+              <p className="text-3xl text-foreground">{generatedRounds}</p>
               <p className="text-muted-foreground mt-1">Rondas generadas</p>
             </div>
 
@@ -310,26 +224,6 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
               <p className="text-muted-foreground mt-1">Óptimo espaciamiento</p>
             </div>
           </div>
-
-          {teamsExcluded > 0 && (
-            <div className="p-4 bg-muted rounded-xl border border-border flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <AlertTriangle className="w-5 h-5 text-foreground" />
-                <p className="text-foreground">
-                  {teamsExcluded} equipos excluidos del draw por problemas de balance
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowExclusionsModal(true)}
-                className="border-border"
-              >
-                <Eye className="w-4 h-4 mr-2" />
-                Ver Detalle
-              </Button>
-            </div>
-          )}
 
           {/* Tabla del draw */}
           <div className="bg-card rounded-xl border border-border overflow-hidden">
@@ -377,6 +271,10 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
                         <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">
                           Completed
                         </Badge>
+                      ) : entry.status === 'skipped' ? (
+                        <Badge className="bg-amber-50 text-amber-700 border-amber-200">
+                          Skipped
+                        </Badge>
                       ) : (
                         <Badge className="bg-muted text-muted-foreground border-border">
                           Pending
@@ -394,22 +292,6 @@ export function DrawTab({ event, isLocked }: DrawTabProps) {
           </div>
         </>
       )}
-
-      {/* Modal de exclusiones */}
-      <Dialog open={showExclusionsModal} onOpenChange={setShowExclusionsModal}>
-        <DialogContent className="sm:max-w-[520px]">
-          <DialogHeader>
-            <DialogTitle className="text-foreground">Equipos Excluidos</DialogTitle>
-            <DialogDescription>Motivos por los que se excluyeron equipos del draw automático</DialogDescription>
-          </DialogHeader>
-
-          <div className="mt-4">
-            <div className="p-3 bg-muted rounded-xl border border-border">
-              <p className="text-foreground">No hay equipos excluidos</p>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

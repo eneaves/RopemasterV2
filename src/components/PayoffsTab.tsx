@@ -277,7 +277,7 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
   }
 
   return (
-    <div className="space-y-6 h-full flex flex-col">
+    <div className="space-y-6 pb-4">
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-foreground mb-1">Gestión de Payoffs</h2>
@@ -359,7 +359,7 @@ export function PayoffsTab({ event }: PayoffsTabProps) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left: Rules Configuration (PRESETS ONLY) */}
         <div className="bg-card border border-border rounded-xl flex flex-col overflow-hidden shadow-sm">
           <div className="p-4 border-b border-border bg-muted/30">

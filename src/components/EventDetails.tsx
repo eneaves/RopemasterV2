@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Edit, Lock, Plus, MapPin, Calendar, Layers, Trophy } from 'lucide-react'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { Tabs, TabsList, TabsTrigger } from './ui/tabs'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -68,10 +68,10 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
   }
 
   return (
-    <div className="flex-1 bg-background h-full overflow-y-auto">
-      <div className="p-6 lg:p-8">
+    <div className="flex-1 bg-background h-full overflow-hidden flex flex-col">
+      <div className="p-4 lg:p-6 flex flex-col flex-1 min-h-0">
         {/* Breadcrumb */}
-        <Breadcrumb className="mb-6">
+        <Breadcrumb className="mb-3">
           <BreadcrumbList>
             <BreadcrumbItem>
               <BreadcrumbLink onClick={onBack} className="cursor-pointer text-muted-foreground hover:text-foreground">
@@ -98,8 +98,8 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
         </Breadcrumb>
 
         {/* Header */}
-        <div className="mb-8">
-          <div className="flex flex-col md:flex-row justify-between items-start gap-4 mb-4">
+        <div className="mb-4">
+          <div className="flex flex-col md:flex-row justify-between items-start gap-4 mb-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2 mb-2">
                  <Badge variant="secondary" className="bg-primary/10 text-primary hover:bg-primary/20 border-primary/10 transition-colors">
@@ -154,7 +154,7 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
 
         <EventMetricsCard event={event} isLocked={isLocked} />
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex flex-col gap-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex flex-col gap-3 flex-1 min-h-0">
           <div className="flex items-center overflow-x-auto pb-2 -mx-6 px-6 lg:mx-0 lg:px-0 lg:pb-0 scrollbar-hide">
               <TabsList className="bg-background border border-border/60 shadow-sm p-1.5 rounded-full h-auto inline-flex items-center gap-1 min-w-max">
                 {[
@@ -180,31 +180,29 @@ export function EventDetails({ event, series, onBack, onCreateEvent, initialTab,
             </TabsList>
           </div>
 
-          <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden flex-1 min-h-[500px]">
-            <div className="p-6 h-full">
-              <TabsContent value="teams" className="mt-0 h-full">
-                <TeamsTab event={event} isLocked={isLocked} onTeamsUpdated={onEventUpdated} />
-              </TabsContent>
+          <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden flex-1 min-h-0 flex flex-col">
+            <div className="p-3 flex-1 min-h-0 flex flex-col">
+              {activeTab === 'capture' ? (
+                <div className="flex-1 min-h-0 flex flex-col">
+                  <CaptureRunsTab event={event} isLocked={isLocked} onLock={() => setIsLocked(true)} />
+                </div>
+              ) : (
+                <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+                  {activeTab === 'teams' && (
+                    <TeamsTab event={event} isLocked={isLocked} onTeamsUpdated={onEventUpdated} />
+                  )}
 
-              <TabsContent value="draw" className="mt-0 h-full">
-                <DrawTab event={event} isLocked={isLocked} />
-              </TabsContent>
+                  {activeTab === 'draw' && <DrawTab event={event} isLocked={isLocked} />}
 
-              <TabsContent value="capture" className="mt-0 h-full">
-                <CaptureRunsTab event={event} isLocked={isLocked} onLock={() => setIsLocked(true)} />
-              </TabsContent>
+                  {activeTab === 'standings' && <StandingsTab event={event} />}
 
-              <TabsContent value="standings" className="mt-0 h-full">
-                <StandingsTab event={event} />
-              </TabsContent>
+                  {activeTab === 'payoffs' && (
+                    <PayoffsTab event={event} onFinalize={() => setPayoffsFinalized(true)} isFinalized={payoffsFinalized} />
+                  )}
 
-              <TabsContent value="payoffs" className="mt-0 h-full">
-                <PayoffsTab event={event} onFinalize={() => setPayoffsFinalized(true)} isFinalized={payoffsFinalized} />
-              </TabsContent>
-
-              <TabsContent value="export" className="mt-0 h-full">
-                <ExportTab event={event} series={series} />
-              </TabsContent>
+                  {activeTab === 'export' && <ExportTab event={event} series={series} />}
+                </div>
+              )}
             </div>
           </div>
         </Tabs>
