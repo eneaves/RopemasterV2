@@ -18,10 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from './ui/select'
-import { getSeries, getEvents, exportEvent } from '../lib/api'
+import { getSeries, getEvents, exportEvent, exportEventBackup } from '../lib/api'
 import { save } from '@tauri-apps/plugin-dialog'
 import { toast } from 'sonner'
 import type { Series, Event } from '../types'
+import { buildEventBackupFilename, getEventBackupErrorMessage } from '../lib/event-backup-ui'
 
 type ExportSelectionOptions = Omit<Parameters<typeof exportEvent>[1], 'file_path'>
 type SectionToggleState = Omit<ExportSelectionOptions, 'include_blocked'>
@@ -237,6 +238,43 @@ export function ExportManagement() {
     })
   }
 
+  const handleExportBackup = async () => {
+    if (!selectedEventId) {
+      toast.error('Selecciona un evento primero')
+      return
+    }
+
+    const eventId = parseInt(selectedEventId, 10)
+    const eventData = eventsList.find((e) => e.id === eventId)
+    const seriesData = seriesList.find((s) => s.id.toString() === selectedSeriesId)
+    const defaultPath = buildEventBackupFilename(
+      seriesData?.name ?? 'Serie',
+      eventData?.name ?? `Evento_${selectedEventId}`
+    )
+
+    const filePath = await save({
+      filters: [{ name: 'Backup de evento', extensions: ['xlsx'] }],
+      defaultPath,
+    })
+    if (!filePath) return
+
+    const toastId = toast.loading('Generando backup del evento...')
+
+    try {
+      await exportEventBackup(eventId, filePath)
+      toast.dismiss(toastId)
+      toast.success('Backup exportado', {
+        description: 'Se generó un archivo de restauración separado del reporte de resultados.',
+      })
+    } catch (error) {
+      toast.dismiss(toastId)
+      console.error(error)
+      toast.error('No se pudo exportar el backup', {
+        description: getEventBackupErrorMessage(error, 'Revisa el archivo o intenta de nuevo.'),
+      })
+    }
+  }
+
   const handleRefresh = async () => {
     try {
       const series = await getSeries()
@@ -332,6 +370,9 @@ export function ExportManagement() {
           </Button>
           <Button variant="outline" className="w-48" onClick={() => handleExport(false)} disabled={!selectedEventId}>
             Exportar Selección
+          </Button>
+          <Button variant="secondary" className="w-48" onClick={handleExportBackup} disabled={!selectedEventId}>
+            Exportar Backup
           </Button>
         </div>
 

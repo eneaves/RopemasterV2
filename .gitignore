@@ -28,3 +28,22 @@ target
 
 *storybook.log
 storybook-static
+
+# Sensitive licensing material
+*.seed
+*.key
+private_key.pem
+current.lic
+current.lic.integrity.json
+installation.key
+installation.json
+issuance_audit.jsonl
+runtime_audit.jsonl
+snapshot-secret.key
+*.lic
+*.req
+*.snap
+*.hwm
+.lab/out/
+.lab/state/
+.lab/dev_signing.key

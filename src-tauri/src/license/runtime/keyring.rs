@@ -4,56 +4,99 @@ use std::sync::Arc;
 use ed25519_dalek::PublicKey;
 use once_cell::sync::Lazy;
 
-pub const DEFAULT_KEY_ID: &str = "primary";
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/license_keyring.rs"));
+}
 
-static EMBEDDED_KEY: Lazy<PublicKey> = Lazy::new(|| {
-    let bytes = include_bytes!("../public_key_dev.der");
-    PublicKey::from_bytes(bytes).expect("invalid embedded license public key")
-});
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStatus {
+    Active,
+    Accepted,
+    Deprecated,
+    Retired,
+}
 
-/// Resolución de llaves públicas para verificar licencias.
-///
-/// - `resolve_key`: resolución básica por `key_id`.
-/// - `resolve_key_versioned`: resolución que también valida `key_version` si el keyring
-///   lo requiere. La impl. por defecto ignora `key_version` y delega en `resolve_key`.
+impl KeyStatus {
+    pub fn from_manifest_str(value: &str) -> Self {
+        match value {
+            "active" => Self::Active,
+            "accepted" => Self::Accepted,
+            "deprecated" => Self::Deprecated,
+            "retired" => Self::Retired,
+            other => panic!("unsupported embedded key status: {other}"),
+        }
+    }
+
+    pub fn allows_verification(self) -> bool {
+        !matches!(self, Self::Retired)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyLookupError {
+    UnknownKeyId { key_id: String },
+    KeyVersionMismatch {
+        key_id: String,
+        key_version: Option<String>,
+    },
+    RetiredKey {
+        key_id: String,
+        key_version: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedKey {
+    pub public_key: PublicKey,
+}
+
+pub const DEFAULT_KEY_ID: &str = generated::EMBEDDED_ACTIVE_KEY_ID;
+pub const DEFAULT_KEY_VERSION: Option<&str> = generated::EMBEDDED_ACTIVE_KEY_VERSION;
+pub const KEYRING_ENV: &str = generated::KEYRING_ENV;
+
 pub trait LicenseKeyring: Send + Sync {
     fn active_key(&self) -> PublicKey;
     fn resolve_key(&self, key_id: &str) -> Option<PublicKey>;
 
-    /// Resuelve la llave pública para `key_id` y opcionalmente valida `key_version`.
-    ///
-    /// Si el keyring tiene una entrada con `key_version` requerida, la licencia debe
-    /// declarar exactamente esa versión. Si la entrada no tiene `key_version` requerida,
-    /// el campo en la licencia se ignora.
-    ///
-    /// Implementaciones que no soporten `key_version` pueden usar el default, que
-    /// simplemente delega en `resolve_key`.
     fn resolve_key_versioned(&self, key_id: &str, _key_version: Option<&str>) -> Option<PublicKey> {
         self.resolve_key(key_id)
     }
+
+    fn lookup_key(
+        &self,
+        key_id: &str,
+        key_version: Option<&str>,
+    ) -> Result<ResolvedKey, KeyLookupError> {
+        let Some(public_key) = self.resolve_key_versioned(key_id, key_version) else {
+            return if self.resolve_key(key_id).is_some() {
+                Err(KeyLookupError::KeyVersionMismatch {
+                    key_id: key_id.to_string(),
+                    key_version: key_version.map(str::to_string),
+                })
+            } else {
+                Err(KeyLookupError::UnknownKeyId {
+                    key_id: key_id.to_string(),
+                })
+            };
+        };
+
+        Ok(ResolvedKey {
+            public_key,
+        })
+    }
 }
 
-/// Entrada individual en un `MultiKeyring`.
 #[derive(Debug, Clone)]
 pub struct KeyEntry {
     pub public_key: PublicKey,
-    /// Si se establece, las licencias que usen este `key_id` deben declarar exactamente
-    /// este `key_version`; de lo contrario se rechaza en `resolve_key_versioned`.
     pub key_version: Option<String>,
+    pub status: KeyStatus,
 }
 
-/// Keyring multi-llave: resuelve llaves públicas por `key_id`, opcionalmente con
-/// validación de `key_version`. Reemplaza al `EmbeddedKeyring` en la ruta de producción.
-///
-/// # Ejemplo
-/// ```rust,ignore
-/// let keyring = MultiKeyring::new()
-///     .with_key("primary", dev_pubkey, None)
-///     .with_key("primary-v2", prod_pubkey, Some("2026".into()));
-/// ```
 pub struct MultiKeyring {
-    keys: HashMap<String, KeyEntry>,
+    keys: HashMap<String, Vec<KeyEntry>>,
     active_key_id: String,
+    active_key_version: Option<String>,
 }
 
 impl MultiKeyring {
@@ -61,84 +104,210 @@ impl MultiKeyring {
         Self {
             keys: HashMap::new(),
             active_key_id: DEFAULT_KEY_ID.to_string(),
+            active_key_version: DEFAULT_KEY_VERSION.map(str::to_string),
         }
     }
 
-    /// Registra una llave pública con la `key_id` dada y una `key_version` opcional.
+    #[cfg(test)]
     pub fn with_key(
-        mut self,
+        self,
         key_id: impl Into<String>,
         public_key: PublicKey,
         key_version: Option<String>,
     ) -> Self {
+        self.with_key_status(key_id, public_key, key_version, KeyStatus::Active)
+    }
+
+    pub fn with_key_status(
+        mut self,
+        key_id: impl Into<String>,
+        public_key: PublicKey,
+        key_version: Option<String>,
+        status: KeyStatus,
+    ) -> Self {
         let id = key_id.into();
-        self.keys.insert(
-            id,
-            KeyEntry {
-                public_key,
-                key_version,
-            },
-        );
+        self.keys.entry(id).or_default().push(KeyEntry {
+            public_key,
+            key_version,
+            status,
+        });
         self
     }
 
-    /// Establece la `key_id` que retorna `active_key()`.
-    pub fn with_active_key(mut self, key_id: impl Into<String>) -> Self {
+    pub fn with_active_key_versioned(
+        mut self,
+        key_id: impl Into<String>,
+        key_version: Option<String>,
+    ) -> Self {
         self.active_key_id = key_id.into();
+        self.active_key_version = key_version;
         self
+    }
+
+    fn entries_for(&self, key_id: &str) -> Option<&[KeyEntry]> {
+        self.keys.get(key_id).map(Vec::as_slice)
     }
 }
 
 impl LicenseKeyring for MultiKeyring {
     fn active_key(&self) -> PublicKey {
-        self.keys
-            .get(&self.active_key_id)
-            .map(|e| e.public_key)
-            .unwrap_or(*EMBEDDED_KEY)
+        self.lookup_key(&self.active_key_id, self.active_key_version.as_deref())
+            .map(|entry| entry.public_key)
+            .expect("active key id missing from keyring")
     }
 
     fn resolve_key(&self, key_id: &str) -> Option<PublicKey> {
-        self.keys.get(key_id).map(|e| e.public_key)
+        self.entries_for(key_id)
+            .and_then(|entries| entries.first())
+            .map(|entry| entry.public_key)
     }
 
-    /// Si la entrada requiere un `key_version`, la versión de la licencia debe coincidir.
-    /// Si la entrada no requiere versión, cualquier valor en la licencia se acepta.
     fn resolve_key_versioned(&self, key_id: &str, key_version: Option<&str>) -> Option<PublicKey> {
-        let entry = self.keys.get(key_id)?;
-        if let Some(required) = &entry.key_version {
-            if key_version != Some(required.as_str()) {
-                return None;
-            }
+        self.lookup_key(key_id, key_version)
+            .ok()
+            .map(|entry| entry.public_key)
+    }
+
+    fn lookup_key(
+        &self,
+        key_id: &str,
+        key_version: Option<&str>,
+    ) -> Result<ResolvedKey, KeyLookupError> {
+        let Some(entries) = self.entries_for(key_id) else {
+            return Err(KeyLookupError::UnknownKeyId {
+                key_id: key_id.to_string(),
+            });
+        };
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.key_version.as_deref() == key_version)
+            .or_else(|| entries.iter().find(|entry| entry.key_version.is_none()));
+        let Some(entry) = entry else {
+            return Err(KeyLookupError::KeyVersionMismatch {
+                key_id: key_id.to_string(),
+                key_version: key_version.map(str::to_string),
+            });
+        };
+
+        if !entry.status.allows_verification() {
+            return Err(KeyLookupError::RetiredKey {
+                key_id: key_id.to_string(),
+                key_version: entry.key_version.clone(),
+            });
         }
-        Some(entry.public_key)
+
+        Ok(ResolvedKey {
+            public_key: entry.public_key,
+        })
     }
 }
 
-/// Keyring single-llave legado. Mantenido para compatibilidad con tests existentes.
-/// Para nuevos usos, preferir `MultiKeyring`.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct EmbeddedKeyring;
 
+static EMBEDDED_ACTIVE_KEY: Lazy<PublicKey> = Lazy::new(|| {
+    PublicKey::from_bytes(
+        &generated::EMBEDDED_KEYS
+            .iter()
+            .find(|entry| {
+                entry.key_id == generated::EMBEDDED_ACTIVE_KEY_ID
+                    && entry.key_version == generated::EMBEDDED_ACTIVE_KEY_VERSION
+            })
+            .expect("embedded active key missing from generated keyring")
+            .public_key,
+    )
+    .expect("invalid embedded active license public key")
+});
+
+#[cfg(test)]
 impl LicenseKeyring for EmbeddedKeyring {
     fn active_key(&self) -> PublicKey {
-        *EMBEDDED_KEY
+        *EMBEDDED_ACTIVE_KEY
     }
 
     fn resolve_key(&self, key_id: &str) -> Option<PublicKey> {
-        (key_id == DEFAULT_KEY_ID).then_some(*EMBEDDED_KEY)
+        generated::EMBEDDED_KEYS
+            .iter()
+            .find(|entry| entry.key_id == key_id)
+            .map(|entry| {
+                PublicKey::from_bytes(&entry.public_key)
+                    .expect("invalid embedded license public key")
+            })
+    }
+
+    fn resolve_key_versioned(&self, key_id: &str, key_version: Option<&str>) -> Option<PublicKey> {
+        self.lookup_key(key_id, key_version)
+            .ok()
+            .map(|entry| entry.public_key)
+    }
+
+    fn lookup_key(
+        &self,
+        key_id: &str,
+        key_version: Option<&str>,
+    ) -> Result<ResolvedKey, KeyLookupError> {
+        let has_key_id = generated::EMBEDDED_KEYS.iter().any(|entry| entry.key_id == key_id);
+        if !has_key_id {
+            return Err(KeyLookupError::UnknownKeyId {
+                key_id: key_id.to_string(),
+            });
+        }
+        let entry = generated::EMBEDDED_KEYS
+            .iter()
+            .filter(|entry| entry.key_id == key_id)
+            .find(|entry| entry.key_version == key_version)
+            .or_else(|| {
+                generated::EMBEDDED_KEYS
+                    .iter()
+                    .filter(|entry| entry.key_id == key_id)
+                    .find(|entry| entry.key_version.is_none())
+            });
+        let Some(entry) = entry else {
+            return Err(KeyLookupError::KeyVersionMismatch {
+                key_id: key_id.to_string(),
+                key_version: key_version.map(str::to_string),
+            });
+        };
+        let status = KeyStatus::from_manifest_str(entry.status);
+        if !status.allows_verification() {
+            return Err(KeyLookupError::RetiredKey {
+                key_id: key_id.to_string(),
+                key_version: entry.key_version.map(str::to_string),
+            });
+        }
+        Ok(ResolvedKey {
+            public_key: PublicKey::from_bytes(&entry.public_key)
+                .expect("invalid embedded license public key"),
+        })
     }
 }
 
-/// Retorna el keyring por defecto: `MultiKeyring` pre-cargado con la llave dev embebida
-/// bajo `key_id = "primary"` (sin restricción de `key_version`).
 pub fn default_keyring() -> Arc<dyn LicenseKeyring + Send + Sync> {
-    static KEYRING: Lazy<Arc<dyn LicenseKeyring + Send + Sync>> =
-        Lazy::new(|| Arc::new(MultiKeyring::new().with_key(DEFAULT_KEY_ID, *EMBEDDED_KEY, None)));
+    static KEYRING: Lazy<Arc<dyn LicenseKeyring + Send + Sync>> = Lazy::new(|| {
+        let keyring = generated::EMBEDDED_KEYS.iter().fold(
+            MultiKeyring::new().with_active_key_versioned(
+                DEFAULT_KEY_ID,
+                DEFAULT_KEY_VERSION.map(str::to_string),
+            ),
+            |ring, entry| {
+                ring.with_key_status(
+                    entry.key_id,
+                    PublicKey::from_bytes(&entry.public_key)
+                        .expect("invalid embedded license public key"),
+                    entry.key_version.map(str::to_string),
+                    KeyStatus::from_manifest_str(entry.status),
+                )
+            },
+        );
+        Arc::new(keyring)
+    });
     KEYRING.clone()
 }
 
 pub fn embedded_public_key() -> PublicKey {
-    *EMBEDDED_KEY
+    *EMBEDDED_ACTIVE_KEY
 }
 
 #[cfg(test)]
@@ -151,8 +320,6 @@ mod tests {
         let secret = SecretKey::from_bytes(&[seed; 32]).unwrap();
         (&secret).into()
     }
-
-    // ── MultiKeyring: resolución básica ──────────────────────────────────────
 
     #[test]
     fn multi_keyring_resolves_known_key_id() {
@@ -169,46 +336,64 @@ mod tests {
     }
 
     #[test]
-    fn multi_keyring_resolves_multiple_keys() {
-        let k1 = make_pubkey(0x03);
-        let k2 = make_pubkey(0x04);
-        let keyring =
-            MultiKeyring::new()
-                .with_key("primary", k1, None)
-                .with_key("secondary", k2, None);
-        assert_eq!(keyring.resolve_key("primary"), Some(k1));
-        assert_eq!(keyring.resolve_key("secondary"), Some(k2));
-        assert_ne!(k1, k2);
-    }
-
-    // ── MultiKeyring: active_key ─────────────────────────────────────────────
-
-    #[test]
-    fn multi_keyring_active_key_returns_first_registered_by_default() {
-        let key = make_pubkey(0x05);
+    fn multi_keyring_resolves_multiple_key_versions_for_same_key_id() {
+        let old = make_pubkey(0x03);
+        let new = make_pubkey(0x04);
         let keyring = MultiKeyring::new()
-            .with_key(DEFAULT_KEY_ID, key, None)
-            .with_active_key(DEFAULT_KEY_ID);
-        assert_eq!(keyring.active_key(), key);
+            .with_key_status(
+                "primary",
+                old,
+                Some("2026-04".into()),
+                KeyStatus::Accepted,
+            )
+            .with_key_status("primary", new, Some("2026-10".into()), KeyStatus::Active);
+        assert_eq!(
+            keyring
+                .lookup_key("primary", Some("2026-04"))
+                .expect("accepted key")
+                .public_key,
+            old
+        );
+        assert_eq!(
+            keyring
+                .lookup_key("primary", Some("2026-10"))
+                .expect("active key")
+                .public_key,
+            new
+        );
     }
 
     #[test]
-    fn multi_keyring_active_key_falls_back_to_embedded_when_id_missing() {
-        // active_key_id no está en el mapa → fallback a EMBEDDED_KEY
+    fn multi_keyring_active_key_returns_selected_version() {
+        let old = make_pubkey(0x05);
+        let new = make_pubkey(0x06);
+        let keyring = MultiKeyring::new()
+            .with_key_status(
+                "primary",
+                old,
+                Some("2026-04".into()),
+                KeyStatus::Accepted,
+            )
+            .with_key_status("primary", new, Some("2026-10".into()), KeyStatus::Active)
+            .with_active_key_versioned("primary", Some("2026-10".into()));
+        assert_eq!(keyring.active_key(), new);
+    }
+
+    #[test]
+    #[should_panic(expected = "active key id missing from keyring")]
+    fn multi_keyring_active_key_panics_when_id_missing() {
         let keyring = MultiKeyring {
             keys: HashMap::new(),
             active_key_id: "nonexistent".to_string(),
+            active_key_version: None,
         };
-        assert_eq!(keyring.active_key(), *EMBEDDED_KEY);
+        let _ = keyring.active_key();
     }
-
-    // ── MultiKeyring: resolve_key_versioned ──────────────────────────────────
 
     #[test]
     fn versioned_resolution_accepts_matching_version() {
-        let key = make_pubkey(0x06);
+        let key = make_pubkey(0x07);
         let keyring = MultiKeyring::new().with_key("primary", key, Some("2026".to_string()));
-        // La licencia declara la versión correcta
         assert_eq!(
             keyring.resolve_key_versioned("primary", Some("2026")),
             Some(key)
@@ -217,24 +402,21 @@ mod tests {
 
     #[test]
     fn versioned_resolution_rejects_wrong_version() {
-        let key = make_pubkey(0x07);
+        let key = make_pubkey(0x08);
         let keyring = MultiKeyring::new().with_key("primary", key, Some("2026".to_string()));
-        // La licencia declara una versión diferente
         assert_eq!(keyring.resolve_key_versioned("primary", Some("2025")), None);
     }
 
     #[test]
     fn versioned_resolution_rejects_missing_version_when_required() {
-        let key = make_pubkey(0x08);
+        let key = make_pubkey(0x09);
         let keyring = MultiKeyring::new().with_key("primary", key, Some("2026".to_string()));
-        // La licencia no declara key_version pero el keyring lo requiere
         assert_eq!(keyring.resolve_key_versioned("primary", None), None);
     }
 
     #[test]
     fn versioned_resolution_accepts_any_version_when_not_required() {
-        let key = make_pubkey(0x09);
-        // La entrada no requiere versión específica
+        let key = make_pubkey(0x0A);
         let keyring = MultiKeyring::new().with_key("primary", key, None);
         assert_eq!(
             keyring.resolve_key_versioned("primary", Some("anything")),
@@ -244,65 +426,66 @@ mod tests {
     }
 
     #[test]
-    fn versioned_resolution_rejects_unknown_key_id() {
-        let key = make_pubkey(0x0A);
-        let keyring = MultiKeyring::new().with_key("primary", key, None);
-        assert_eq!(keyring.resolve_key_versioned("unknown", None), None);
-    }
-
-    // ── Compatibilidad entre llaves dev/prod (key_id distintos) ─────────────
-
-    #[test]
-    fn dev_and_prod_keys_coexist_without_interference() {
-        let dev_key = make_pubkey(0x0B);
-        let prod_key = make_pubkey(0x0C);
-        let keyring = MultiKeyring::new()
-            .with_key("primary", dev_key, None)
-            .with_key("primary-prod", prod_key, Some("2026".to_string()));
-
-        // dev key resuelve sin restricción de versión
-        assert_eq!(keyring.resolve_key("primary"), Some(dev_key));
-        // prod key requiere versión correcta
-        assert_eq!(
-            keyring.resolve_key_versioned("primary-prod", Some("2026")),
-            Some(prod_key)
+    fn lookup_rejects_retired_key_explicitly() {
+        let key = make_pubkey(0x0B);
+        let keyring = MultiKeyring::new().with_key_status(
+            "primary",
+            key,
+            Some("2026-01".into()),
+            KeyStatus::Retired,
         );
-        // prod key rechaza versión incorrecta
-        assert_eq!(
-            keyring.resolve_key_versioned("primary-prod", Some("dev")),
-            None
-        );
-        // las llaves no se mezclan entre sí
-        assert_ne!(dev_key, prod_key);
-    }
-
-    // ── EmbeddedKeyring (backward compat) ────────────────────────────────────
-
-    #[test]
-    fn embedded_keyring_resolves_primary() {
-        let keyring = EmbeddedKeyring;
-        assert!(keyring.resolve_key(DEFAULT_KEY_ID).is_some());
-        assert!(keyring.resolve_key("unknown").is_none());
+        match keyring.lookup_key("primary", Some("2026-01")) {
+            Err(KeyLookupError::RetiredKey {
+                key_id,
+                key_version,
+            }) if key_id == "primary" && key_version.as_deref() == Some("2026-01") => {}
+            other => panic!("unexpected lookup result: {other:?}"),
+        }
     }
 
     #[test]
-    fn embedded_keyring_resolve_key_versioned_ignores_version() {
-        // EmbeddedKeyring hereda el default de resolve_key_versioned que ignora versión
-        let keyring = EmbeddedKeyring;
-        assert!(keyring
-            .resolve_key_versioned(DEFAULT_KEY_ID, Some("any"))
-            .is_some());
-        assert!(keyring
-            .resolve_key_versioned(DEFAULT_KEY_ID, None)
-            .is_some());
-    }
-
-    // ── default_keyring ──────────────────────────────────────────────────────
-
-    #[test]
-    fn default_keyring_resolves_primary() {
+    fn default_keyring_contains_embedded_active_key() {
         let ring = default_keyring();
-        assert!(ring.resolve_key(DEFAULT_KEY_ID).is_some());
-        assert!(ring.resolve_key("nonexistent").is_none());
+        let active = ring
+            .lookup_key(DEFAULT_KEY_ID, DEFAULT_KEY_VERSION)
+            .expect("embedded active key");
+        assert_eq!(active.public_key, embedded_public_key());
+    }
+
+    #[test]
+    fn embedded_keyring_active_matches_generated_constants() {
+        let ring = EmbeddedKeyring;
+        assert_eq!(ring.active_key(), embedded_public_key());
+        assert_eq!(KEYRING_ENV, generated::KEYRING_ENV);
+        assert!(!generated::EMBEDDED_KEYS.is_empty());
+        assert!(generated::EMBEDDED_KEYS.iter().all(|entry| entry.status != "invalid"));
+    }
+
+    #[test]
+    fn generated_keyring_contains_only_selected_environment_entries() {
+        let versions = generated::EMBEDDED_KEYS
+            .iter()
+            .map(|entry| entry.key_version)
+            .collect::<Vec<_>>();
+        match KEYRING_ENV {
+            "dev" => {
+                assert_eq!(generated::EMBEDDED_KEYS.len(), 1);
+                assert_eq!(versions, vec![None]);
+            }
+            "staging" => {
+                assert_eq!(generated::EMBEDDED_KEYS.len(), 3);
+                assert!(versions.contains(&Some("2026-04")));
+                assert!(versions.contains(&Some("2026-07")));
+                assert!(versions.contains(&Some("2026-10")));
+            }
+            "prod" => {
+                assert_eq!(generated::EMBEDDED_KEYS.len(), 4);
+                assert!(versions.contains(&Some("2026-01")));
+                assert!(versions.contains(&Some("2026-04")));
+                assert!(versions.contains(&Some("2026-07")));
+                assert!(versions.contains(&Some("2026-10")));
+            }
+            other => panic!("unexpected keyring env {other}"),
+        }
     }
 }

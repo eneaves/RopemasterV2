@@ -1,0 +1,78 @@
+{
+  "version": 2,
+  "keys": [
+    {
+      "environment": "dev",
+      "key_id": "primary",
+      "key_version": null,
+      "algorithm": "ed25519-sha512",
+      "public_key_fingerprint_sha256": "6c8f8607dbe87077a62a2990ce07d94aaf749df76f87b98eb786a6d10f030765",
+      "status": "active",
+      "asset_path": "dev/primary.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "staging",
+      "key_id": "primary",
+      "key_version": "2026-04",
+      "public_key_fingerprint_sha256": "48cca97f8993ffaebcac9728d7f94f7144f18090d329d9370a7dfc42db38d14d",
+      "status": "accepted",
+      "asset_path": "staging/primary-2026-04.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "staging",
+      "key_id": "primary",
+      "key_version": "2026-07",
+      "public_key_fingerprint_sha256": "1325b850c2871916eae203f0efc3c8987f64e5e3cdb27679e6d1fa97808357e6",
+      "status": "accepted",
+      "asset_path": "staging/primary-2026-07.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "staging",
+      "key_id": "primary",
+      "key_version": "2026-10",
+      "public_key_fingerprint_sha256": "f9d70c58064a3aa5ebda597c578e4dc84333d0398f35034bbd587713799e7a61",
+      "status": "active",
+      "asset_path": "staging/primary-2026-10.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "prod",
+      "key_id": "primary",
+      "key_version": "2026-01",
+      "public_key_fingerprint_sha256": "24aa2a5589edcb57fea0be3552f065de6d3a837feaccf60f8bde018fa4926b6a",
+      "status": "retired",
+      "asset_path": "prod/primary-2026-01.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "prod",
+      "key_id": "primary",
+      "key_version": "2026-04",
+      "public_key_fingerprint_sha256": "eeec86207f875ff654d070a8179f86becb1fda1395b3312be417542c99c6ba53",
+      "status": "deprecated",
+      "asset_path": "prod/primary-2026-04.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "prod",
+      "key_id": "primary",
+      "key_version": "2026-07",
+      "public_key_fingerprint_sha256": "0cc42263abfb754678ab60fc3511210608a4b3a64b996170d96b4c21eb3cecbc",
+      "status": "accepted",
+      "asset_path": "prod/primary-2026-07.der"
+    },
+    {
+      "algorithm": "ed25519-sha512",
+      "environment": "prod",
+      "key_id": "primary",
+      "key_version": "2026-10",
+      "public_key_fingerprint_sha256": "c6efefed6235c7e68c08ded69536fe21f8c6e6b7b708a608f452061ee01475a1",
+      "status": "active",
+      "asset_path": "prod/primary-2026-10.der"
+    }
+  ],
+  "pending_environments": []
+}

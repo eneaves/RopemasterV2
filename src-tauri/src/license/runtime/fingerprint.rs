@@ -14,16 +14,25 @@ pub type DeviceFingerprint = shared_core::Fingerprint;
 /// validate or update any binding state — it fails closed.
 ///
 /// Required:
-/// - `machine_id` must be present (most stable hardware identifier)
+/// - `machine_id` must be present (stable host identifier)
+/// - `disk_serial` must be present (independent hardware contributor)
 ///
-/// If machine_id is None the observation is considered partial/insufficient
-/// and the caller must propagate an error rather than silently continuing.
+/// If any required value is missing the observation is considered
+/// partial/insufficient and the caller must propagate an error rather than
+/// silently continuing.
 pub fn assert_observation_sufficient(obs: &ObservedHardware) -> CmdResult<()> {
     if obs.machine_id.as_deref().map_or(true, |s| s.is_empty()) {
         return Err(CommandError::new(
             "InsufficientObservation",
             "Hardware observation is incomplete: machine_id is required for binding. \
              The system cannot validate or update binding state without a stable machine identifier.",
+        ));
+    }
+    if obs.disk_serial.as_deref().map_or(true, |s| s.is_empty()) {
+        return Err(CommandError::new(
+            "InsufficientObservation",
+            "Hardware observation is incomplete: disk_serial is required for binding. \
+             The system cannot validate or update binding state without an independent disk identifier.",
         ));
     }
     Ok(())
@@ -33,6 +42,7 @@ pub fn assert_observation_sufficient(obs: &ObservedHardware) -> CmdResult<()> {
 pub struct ObservedHardware {
     pub platform: shared_core::Platform,
     pub machine_id: Option<String>,
+    pub disk_serial: Option<String>,
     pub cpu_model: Option<String>,
     pub hostname: Option<String>,
     pub locale: Option<String>,
@@ -51,6 +61,7 @@ impl HardwareObserver for SystemHardwareObserver {
         Ok(ObservedHardware {
             platform: map_platform()?,
             machine_id: collect_machine_id(),
+            disk_serial: collect_disk_serial(),
             cpu_model: collect_cpu_model(),
             hostname: whoami::fallible::hostname()
                 .ok()
@@ -67,11 +78,6 @@ impl HardwareObserver for SystemHardwareObserver {
 
 pub fn default_hardware_observer() -> Arc<dyn HardwareObserver + Send + Sync> {
     Arc::new(SystemHardwareObserver)
-}
-
-pub fn collect_fingerprint(installation_id: &str) -> CmdResult<DeviceFingerprint> {
-    let observer = SystemHardwareObserver;
-    collect_fingerprint_with_observer(installation_id, &observer)
 }
 
 pub fn collect_fingerprint_with_observer(
@@ -103,6 +109,15 @@ pub fn collect_fingerprint_from_observation(
             machine_id,
             shared_core::ComponentSource::System,
             5,
+        ));
+    }
+
+    if let Some(disk_serial) = observed.disk_serial.as_deref() {
+        stable.push(component(
+            shared_core::ComponentKind::DiskSerial,
+            disk_serial,
+            shared_core::ComponentSource::System,
+            4,
         ));
     }
 
@@ -277,6 +292,43 @@ fn collect_cpu_model() -> Option<String> {
     .or_else(|| Some(std::env::consts::ARCH.to_string()))
 }
 
+fn collect_disk_serial() -> Option<String> {
+    match std::env::consts::OS {
+        "linux" => collect_linux_disk_serial(),
+        "macos" => collect_macos_disk_serial(),
+        "windows" => collect_windows_disk_serial(),
+        _ => None,
+    }
+}
+
+fn collect_linux_disk_serial() -> Option<String> {
+    command_output("findmnt", &["-n", "-o", "SOURCE", "/"])
+        .and_then(|source| command_output("lsblk", &["-ndo", "SERIAL", source.trim()]))
+        .and_then(|output| first_nonempty_line(&output))
+        .or_else(|| {
+            command_output("lsblk", &["-ndo", "SERIAL"])
+                .and_then(|output| first_nonempty_line(&output))
+        })
+}
+
+fn collect_macos_disk_serial() -> Option<String> {
+    command_output(
+        "system_profiler",
+        &["SPNVMeDataType", "SPSerialATADataType", "SPStorageDataType"],
+    )
+    .and_then(|output| parse_colon_assignment(&output, "Serial Number"))
+    .or_else(|| {
+        command_output("ioreg", &["-r", "-c", "AppleAHCIDiskDriver", "-d", "2"])
+            .and_then(|output| parse_quoted_assignment(&output, "Serial Number"))
+    })
+}
+
+fn collect_windows_disk_serial() -> Option<String> {
+    command_output("wmic", &["diskdrive", "get", "serialnumber"])
+        .and_then(|output| first_nonempty_line(&output))
+        .filter(|line| !line.eq_ignore_ascii_case("serialnumber"))
+}
+
 fn read_first_non_empty(paths: &[&str]) -> Option<String> {
     paths.iter().find_map(|path| {
         fs::read_to_string(path)
@@ -311,10 +363,34 @@ fn parse_quoted_assignment(output: &str, key: &str) -> Option<String> {
     })
 }
 
+fn parse_colon_assignment(output: &str, key: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if label.trim().eq_ignore_ascii_case(key) {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn first_nonempty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        assert_observation_sufficient, collect_fingerprint, collect_fingerprint_from_observation,
+        assert_observation_sufficient, collect_fingerprint_from_observation,
         collect_fingerprint_with_observer, fingerprint_hardware_hash_bytes, HardwareObserver,
         ObservedHardware,
     };
@@ -329,10 +405,16 @@ mod tests {
         }
     }
 
-    fn sample_observed(machine_id: &str, cpu: &str, hostname: &str) -> ObservedHardware {
+    fn sample_observed(
+        machine_id: &str,
+        disk_serial: &str,
+        cpu: &str,
+        hostname: &str,
+    ) -> ObservedHardware {
         ObservedHardware {
             platform: shared_core::Platform::Macos,
             machine_id: Some(machine_id.into()),
+            disk_serial: Some(disk_serial.into()),
             cpu_model: Some(cpu.into()),
             hostname: Some(hostname.into()),
             locale: Some("en_US.UTF-8".into()),
@@ -344,6 +426,19 @@ mod tests {
         ObservedHardware {
             platform: shared_core::Platform::Macos,
             machine_id: None,
+            disk_serial: Some("disk-a".into()),
+            cpu_model: Some("AppleM1".into()),
+            hostname: Some("host".into()),
+            locale: Some("en_US.UTF-8".into()),
+            timezone: "-0600".into(),
+        }
+    }
+
+    fn sample_no_disk_serial() -> ObservedHardware {
+        ObservedHardware {
+            platform: shared_core::Platform::Macos,
+            machine_id: Some("machine-a".into()),
+            disk_serial: None,
             cpu_model: Some("AppleM1".into()),
             hostname: Some("host".into()),
             locale: Some("en_US.UTF-8".into()),
@@ -368,6 +463,20 @@ mod tests {
     }
 
     #[test]
+    fn observation_without_disk_serial_is_insufficient() {
+        let obs = sample_no_disk_serial();
+        let err = assert_observation_sufficient(&obs).unwrap_err();
+        assert_eq!(err.code, "InsufficientObservation");
+    }
+
+    #[test]
+    fn collect_fingerprint_with_observer_fails_when_disk_serial_missing() {
+        let observer = FixedObserver(sample_no_disk_serial());
+        let err = collect_fingerprint_with_observer("some-id", &observer).unwrap_err();
+        assert_eq!(err.code, "InsufficientObservation");
+    }
+
+    #[test]
     fn collect_fingerprint_with_observer_does_not_contaminate_state_on_insufficient_obs() {
         // This test verifies the fail-closed property:
         // when collect_fingerprint_with_observer returns an error, no fingerprint was produced.
@@ -379,16 +488,19 @@ mod tests {
 
     #[test]
     fn observation_with_machine_id_is_sufficient() {
-        let obs = sample_observed("machine-a", "cpu-a", "host-a");
+        let obs = sample_observed("machine-a", "disk-a", "cpu-a", "host-a");
         assert!(assert_observation_sufficient(&obs).is_ok());
     }
 
     // ── Existing fingerprint tests ─────────────────────────────────────────────
 
     #[test]
-    fn collects_valid_fingerprint_v2() {
-        let fingerprint = collect_fingerprint("550e8400-e29b-41d4-a716-446655440000")
-            .expect("collect fingerprint");
+    fn builds_valid_fingerprint_v2_from_observation() {
+        let fingerprint = collect_fingerprint_from_observation(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &sample_observed("machine-a", "disk-a", "cpu-a", "host-a"),
+        )
+        .expect("collect fingerprint");
         shared_core::validate_fingerprint(&fingerprint).expect("valid fingerprint");
         assert_eq!(
             fingerprint_hardware_hash_bytes(&fingerprint)
@@ -400,16 +512,19 @@ mod tests {
 
     #[test]
     fn fingerprint_is_shared_core_compatible() {
-        let fingerprint = collect_fingerprint("550e8400-e29b-41d4-a716-446655440000")
-            .expect("collect fingerprint");
+        let fingerprint = collect_fingerprint_from_observation(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &sample_observed("machine-a", "disk-a", "cpu-a", "host-a"),
+        )
+        .expect("collect fingerprint");
         let bytes = shared_core::canonical_fingerprint_bytes(&fingerprint).expect("canonical");
         assert!(!bytes.is_empty());
     }
 
     #[test]
     fn observed_hardware_changes_hash() {
-        let first = sample_observed("machine-a", "cpu-a", "host-a");
-        let second = sample_observed("machine-b", "cpu-a", "host-a");
+        let first = sample_observed("machine-a", "disk-a", "cpu-a", "host-a");
+        let second = sample_observed("machine-b", "disk-a", "cpu-a", "host-a");
         let first_fp =
             collect_fingerprint_from_observation("550e8400-e29b-41d4-a716-446655440000", &first)
                 .expect("first fingerprint");
@@ -421,7 +536,7 @@ mod tests {
 
     #[test]
     fn observer_roundtrip_matches_direct_build() {
-        let observed = sample_observed("machine-a", "cpu-a", "host-a");
+        let observed = sample_observed("machine-a", "disk-a", "cpu-a", "host-a");
         let observer = FixedObserver(observed.clone());
         let via_observer =
             collect_fingerprint_with_observer("550e8400-e29b-41d4-a716-446655440000", &observer)
@@ -430,5 +545,19 @@ mod tests {
             collect_fingerprint_from_observation("550e8400-e29b-41d4-a716-446655440000", &observed)
                 .expect("direct fingerprint");
         assert_eq!(via_observer, direct);
+    }
+
+    #[test]
+    fn fingerprint_includes_disk_serial_component() {
+        let fingerprint = collect_fingerprint_from_observation(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &sample_observed("machine-a", "disk-a", "cpu-a", "host-a"),
+        )
+        .expect("collect fingerprint");
+        assert!(fingerprint
+            .binding
+            .stable
+            .iter()
+            .any(|component| { component.kind == shared_core::ComponentKind::DiskSerial }));
     }
 }

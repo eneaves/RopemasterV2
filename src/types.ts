@@ -107,3 +107,32 @@ export interface DashboardStats {
   upcoming_events_30d: number
   global_progress: number
 }
+
+export interface BackupInspection {
+  format: string
+  version: number
+  eventName: string
+  eventDate: string
+  rounds: number
+  ropersCount: number
+  teamsCount: number
+  runsCount: number
+  warnings: string[]
+}
+
+export interface ImportEventBackupPayload {
+  filePath: string
+  targetSeriesId: number
+  restoreStatusMode?: 'preserve' | 'force_upcoming' | 'force_locked'
+  dedupeRopers?: boolean
+}
+
+export interface ImportEventBackupResult {
+  eventId: number
+  eventName: string
+  ropersCreated: number
+  ropersReused: number
+  teamsCreated: number
+  runsCreated: number
+  warnings: string[]
+}

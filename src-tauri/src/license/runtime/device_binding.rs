@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer};
+use ed25519_dalek::{Keypair, PublicKey, SecretKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,9 @@ use tauri::{AppHandle, Manager};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::license::{write_atomic, CmdResult, CommandError};
+use crate::license::{
+    ensure_sensitive_dir, validate_sensitive_file, write_atomic_secure, CmdResult, CommandError,
+};
 
 use super::{
     fingerprint::{
@@ -26,7 +29,16 @@ use super::{
 const DEVICE_DIR: &str = "device";
 const LEGACY_FILE: &str = "device_id.bin";
 const INSTALLATION_FILE: &str = "installation.json";
-const INSTALLATION_SCHEMA_V3: u32 = 3;
+const INSTALLATION_KEY_FILE: &str = "installation.key";
+const INSTALLATION_SCHEMA_V4: u32 = 4;
+pub(crate) const OBSERVED_BINDING_CACHE_TTL: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
+struct CachedObservedBinding {
+    fingerprint: DeviceFingerprint,
+    hardware_hash: [u8; 32],
+    observed_at: Instant,
+}
 
 /// Manages the persistent installation identity and device binding.
 ///
@@ -45,17 +57,21 @@ const INSTALLATION_SCHEMA_V3: u32 = 3;
 #[derive(Clone)]
 pub struct DeviceBindingStore {
     installation_path: PathBuf,
+    key_path: PathBuf,
     installation: Arc<RwLock<InstallationState>>,
     observer: Arc<dyn HardwareObserver + Send + Sync>,
     /// Hardware hash anchored at installation time (content of `installation.json`).
     /// Never updated after initial bootstrap — used to detect hardware drift.
     persisted_hardware_hash: [u8; 32],
+    observed_binding_cache: Arc<Mutex<Option<CachedObservedBinding>>>,
+    observed_binding_cache_ttl: Duration,
 }
 
 impl std::fmt::Debug for DeviceBindingStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceBindingStore")
             .field("installation_path", &self.installation_path)
+            .field("key_path", &self.key_path)
             .field("installation", &self.installation())
             .field("has_hardware_drift", &self.has_hardware_drift())
             .finish()
@@ -73,41 +89,47 @@ impl DeviceBindingStore {
     }
 
     pub(crate) fn load_or_init_from_dir(dir: impl AsRef<Path>) -> CmdResult<Self> {
-        Self::load_or_init_from_dir_with_observer(dir, default_hardware_observer())
+        Self::load_or_init_from_dir_with_observer_and_cache_ttl(
+            dir,
+            default_hardware_observer(),
+            OBSERVED_BINDING_CACHE_TTL,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn load_or_init_from_dir_with_observer(
         dir: impl AsRef<Path>,
         observer: Arc<dyn HardwareObserver + Send + Sync>,
     ) -> CmdResult<Self> {
+        Self::load_or_init_from_dir_with_observer_and_cache_ttl(
+            dir,
+            observer,
+            OBSERVED_BINDING_CACHE_TTL,
+        )
+    }
+
+    pub(crate) fn load_or_init_from_dir_with_observer_and_cache_ttl(
+        dir: impl AsRef<Path>,
+        observer: Arc<dyn HardwareObserver + Send + Sync>,
+        observed_binding_cache_ttl: Duration,
+    ) -> CmdResult<Self> {
         let dir = dir.as_ref();
-        fs::create_dir_all(dir).map_err(|e| CommandError::io(e.to_string()))?;
+        ensure_sensitive_dir(dir).map_err(|e| CommandError::io(e.to_string()))?;
         let installation_path = dir.join(INSTALLATION_FILE);
+        let key_path = dir.join(INSTALLATION_KEY_FILE);
         let installation = if installation_path.exists() {
-            // Read the schema before loading so we know whether to upgrade.
-            let file_schema = {
-                let bytes = fs::read(&installation_path)
-                    .map_err(|e| CommandError::io(e.to_string()))?;
-                read_schema(&bytes)?
-            };
-            let state = Self::load_existing(&installation_path, observer.as_ref())?;
-            if file_schema < INSTALLATION_SCHEMA_V3 {
-                // Eagerly upgrade legacy schemas (V1/V2) to V3 so the keypair
-                // is stable across restarts.
-                //
-                // V1 files do not store the private key → without this persist a new
-                // random keypair would be generated on *every* startup, making every
-                // previously-issued license produce DeviceMismatch on the next boot.
-                //
-                // V2 files preserve the existing keypair; upgrading is safe and
-                // prevents the unnecessary re-bootstrap overhead on every run.
-                //
-                // This is a one-time migration: once the file is V3 it will be loaded
-                // directly on all subsequent runs.
+            validate_sensitive_file(&installation_path)
+                .map_err(|e| CommandError::io(e.to_string()))?;
+            let bytes =
+                fs::read(&installation_path).map_err(|e| CommandError::io(e.to_string()))?;
+            let file_schema = read_schema(&bytes)?;
+            let (state, needs_persist) =
+                Self::load_existing(&installation_path, &key_path, &bytes, observer.as_ref())?;
+            if needs_persist || file_schema < INSTALLATION_SCHEMA_V4 {
                 tracing::info!(
                     schema = file_schema,
                     path = %installation_path.display(),
-                    "Upgrading installation.json from schema {} to V3 to stabilise identity",
+                    "Upgrading installation.json from schema {} to V4 and moving secret material to key store",
                     file_schema,
                 );
                 Self::persist(&installation_path, &state)?;
@@ -120,13 +142,16 @@ impl DeviceBindingStore {
                     installation_id: None,
                     created_at: None,
                     keypair: None,
+                    fingerprint: None,
+                    hardware_hash: None,
                     legacy_device_hash: Some(hash),
                     migrated_from_legacy: true,
                 })
             } else {
                 None
             };
-            let installation = Self::bootstrap_installation(legacy_context, observer.as_ref())?;
+            let installation =
+                Self::bootstrap_installation(legacy_context, &key_path, observer.as_ref())?;
             Self::persist(&installation_path, &installation)?;
             installation
         };
@@ -136,43 +161,57 @@ impl DeviceBindingStore {
 
         let store = Self {
             installation_path,
+            key_path,
             installation: Arc::new(RwLock::new(installation)),
             observer,
             persisted_hardware_hash,
+            observed_binding_cache: Arc::new(Mutex::new(None)),
+            observed_binding_cache_ttl,
         };
         store.refresh_observed_binding()?;
         Ok(store)
     }
 
-    fn load_existing(path: &Path, observer: &dyn HardwareObserver) -> CmdResult<InstallationState> {
-        let bytes = fs::read(path).map_err(|e| CommandError::io(e.to_string()))?;
-        let schema = read_schema(&bytes)?;
-        if schema >= INSTALLATION_SCHEMA_V3 {
+    fn load_existing(
+        _path: &Path,
+        key_path: &Path,
+        bytes: &[u8],
+        observer: &dyn HardwareObserver,
+    ) -> CmdResult<(InstallationState, bool)> {
+        let schema = read_schema(bytes)?;
+        if schema >= INSTALLATION_SCHEMA_V4 {
+            let file: InstallationFileV4 =
+                serde_json::from_slice(bytes).map_err(|e| CommandError::parse(e.to_string()))?;
+            return Ok((file.try_into_state(key_path)?, false));
+        }
+
+        if schema >= 3 {
             let file: InstallationFileV3 =
-                serde_json::from_slice(&bytes).map_err(|e| CommandError::parse(e.to_string()))?;
-            return file.try_into_state();
+                serde_json::from_slice(bytes).map_err(|e| CommandError::parse(e.to_string()))?;
+            return Ok((file.try_into_state(key_path)?, true));
         }
 
         if schema >= 2 {
             let legacy: InstallationFileV2 =
-                serde_json::from_slice(&bytes).map_err(|e| CommandError::parse(e.to_string()))?;
-            return legacy.into_context()?.into_state(observer);
+                serde_json::from_slice(bytes).map_err(|e| CommandError::parse(e.to_string()))?;
+            return Ok((legacy.into_context()?.into_state(key_path, observer)?, true));
         }
 
         let legacy: InstallationFileV1 =
-            serde_json::from_slice(&bytes).map_err(|e| CommandError::parse(e.to_string()))?;
-        legacy.into_context()?.into_state(observer)
+            serde_json::from_slice(bytes).map_err(|e| CommandError::parse(e.to_string()))?;
+        Ok((legacy.into_context()?.into_state(key_path, observer)?, true))
     }
 
     fn persist(path: &Path, installation: &InstallationState) -> CmdResult<()> {
-        let file = InstallationFileV3::from_state(installation);
+        let file = InstallationFileV4::from_state(installation);
         let bytes =
             serde_json::to_vec_pretty(&file).map_err(|err| CommandError::parse(err.to_string()))?;
-        write_atomic(path, &bytes).map_err(|err| CommandError::io(err.to_string()))
+        write_atomic_secure(path, &bytes).map_err(|err| CommandError::io(err.to_string()))
     }
 
     fn bootstrap_installation(
         mut ctx: Option<LegacyBindingContext>,
+        key_path: &Path,
         observer: &dyn HardwareObserver,
     ) -> CmdResult<InstallationState> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -181,12 +220,21 @@ impl DeviceBindingStore {
             .and_then(|c| c.installation_id.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let created_at = ctx.as_ref().and_then(|c| c.created_at).unwrap_or(now);
-        let keypair = ctx
+        let expected_keypair = ctx
             .as_mut()
             .and_then(|c| c.keypair.take())
-            .unwrap_or(generate_installation_keypair()?);
-        let fingerprint = collect_fingerprint_with_observer(&installation_id, observer)?;
-        let hardware_hash = fingerprint_hardware_hash_bytes(&fingerprint)?;
+            .map(Ok)
+            .unwrap_or_else(generate_installation_keypair)?;
+        let key_store = load_or_create_key_store(key_path, Some(expected_keypair))?;
+        let installation_pubkey = key_store.pubkey_bytes();
+        let fingerprint = match ctx.as_ref().and_then(|c| c.fingerprint.clone()) {
+            Some(fingerprint) => fingerprint,
+            None => collect_fingerprint_with_observer(&installation_id, observer)?,
+        };
+        let hardware_hash = match ctx.as_ref().and_then(|c| c.hardware_hash) {
+            Some(hash) => hash,
+            None => fingerprint_hardware_hash_bytes(&fingerprint)?,
+        };
         let legacy_device_hash = ctx.as_ref().and_then(|c| c.legacy_device_hash);
         let migrated_from_legacy = ctx
             .as_ref()
@@ -196,7 +244,8 @@ impl DeviceBindingStore {
         Ok(InstallationState {
             installation_id,
             hardware_hash,
-            keypair,
+            installation_pubkey,
+            key_store: Arc::new(key_store),
             fingerprint,
             created_at,
             migrated_from_legacy,
@@ -241,9 +290,8 @@ impl DeviceBindingStore {
     /// state with a partial observation.
     pub fn refresh_observed_binding(&self) -> CmdResult<bool> {
         let current = self.snapshot();
-        let observed =
-            collect_fingerprint_with_observer(&current.installation_id, self.observer.as_ref())?;
-        let observed_hash = fingerprint_hardware_hash_bytes(&observed)?;
+        let (observed, observed_hash) =
+            self.cached_or_collect_observed_binding(&current.installation_id)?;
 
         let changed = current.hardware_hash != observed_hash || current.fingerprint != observed;
         if changed {
@@ -270,6 +318,14 @@ impl DeviceBindingStore {
         Ok(changed)
     }
 
+    pub fn invalidate_observed_binding_cache(&self) {
+        let mut guard = self
+            .observed_binding_cache
+            .lock()
+            .expect("observed binding cache poisoned");
+        *guard = None;
+    }
+
     /// Returns `true` when the currently observed hardware hash differs from the
     /// hardware hash that was anchored at installation time (`installation.json`).
     ///
@@ -281,14 +337,12 @@ impl DeviceBindingStore {
 
     /// Returns an abstraction over the installation's private key.
     ///
-    /// This is the Phase 3 indirection layer.  Currently backed by the keypair
-    /// stored in `installation.json`; future phases may swap this to a platform
-    /// keystore (Keychain / DPAPI / secret-service) without changing any callers.
+    /// This is the indirection layer for installation signing. The current
+    /// backend is a dedicated `installation.key` file; future phases may swap
+    /// this to a platform keystore (Keychain / DPAPI / secret-service) without
+    /// changing any callers.
     pub fn key_store(&self) -> Arc<dyn InstallationKeyStore + Send + Sync> {
-        let kp_bytes = self.snapshot().keypair.to_bytes();
-        Arc::new(FileBackedKeyStore::new(
-            Keypair::from_bytes(&kp_bytes).expect("clone installation keypair"),
-        ))
+        self.snapshot().key_store
     }
 
     #[allow(dead_code)]
@@ -321,7 +375,31 @@ impl DeviceBindingStore {
     }
 
     pub fn sign_request(&self, payload: &[u8]) -> [u8; 64] {
-        self.snapshot().keypair.sign(payload).to_bytes()
+        self.snapshot().key_store.sign(payload)
+    }
+
+    fn cached_or_collect_observed_binding(
+        &self,
+        installation_id: &str,
+    ) -> CmdResult<(DeviceFingerprint, [u8; 32])> {
+        let mut guard = self
+            .observed_binding_cache
+            .lock()
+            .expect("observed binding cache poisoned");
+        if let Some(cached) = guard.as_ref() {
+            if cached.observed_at.elapsed() <= self.observed_binding_cache_ttl {
+                return Ok((cached.fingerprint.clone(), cached.hardware_hash));
+            }
+        }
+
+        let observed = collect_fingerprint_with_observer(installation_id, self.observer.as_ref())?;
+        let observed_hash = fingerprint_hardware_hash_bytes(&observed)?;
+        *guard = Some(CachedObservedBinding {
+            fingerprint: observed.clone(),
+            hardware_hash: observed_hash,
+            observed_at: Instant::now(),
+        });
+        Ok((observed, observed_hash))
     }
 }
 
@@ -339,13 +417,97 @@ struct LegacyBindingContext {
     installation_id: Option<String>,
     created_at: Option<i64>,
     keypair: Option<Keypair>,
+    fingerprint: Option<DeviceFingerprint>,
+    hardware_hash: Option<[u8; 32]>,
     legacy_device_hash: Option<[u8; 32]>,
     migrated_from_legacy: bool,
 }
 
 impl LegacyBindingContext {
-    fn into_state(self, observer: &dyn HardwareObserver) -> CmdResult<InstallationState> {
-        DeviceBindingStore::bootstrap_installation(Some(self), observer)
+    fn into_state(
+        self,
+        key_path: &Path,
+        observer: &dyn HardwareObserver,
+    ) -> CmdResult<InstallationState> {
+        DeviceBindingStore::bootstrap_installation(Some(self), key_path, observer)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct InstallationFileV4 {
+    schema: u32,
+    installation_id: String,
+    installation_pubkey_b64: String,
+    key_file: String,
+    fingerprint: DeviceFingerprint,
+    hardware_hash_hex: String,
+    created_at: i64,
+    migrated_from_legacy: bool,
+    legacy_device_hash_hex: Option<String>,
+}
+
+impl InstallationFileV4 {
+    fn from_state(state: &InstallationState) -> Self {
+        Self {
+            schema: INSTALLATION_SCHEMA_V4,
+            installation_id: state.installation_id.clone(),
+            installation_pubkey_b64: STANDARD.encode(state.installation_pubkey()),
+            key_file: INSTALLATION_KEY_FILE.into(),
+            fingerprint: state.fingerprint.clone(),
+            hardware_hash_hex: state.device_hash_hex(),
+            created_at: state.created_at,
+            migrated_from_legacy: state.migrated_from_legacy,
+            legacy_device_hash_hex: state.legacy_device_hash.map(hex::encode),
+        }
+    }
+
+    fn try_into_state(self, key_path: &Path) -> CmdResult<InstallationState> {
+        if self.schema != INSTALLATION_SCHEMA_V4 {
+            return Err(CommandError::parse(format!(
+                "installation schema {} unsupported",
+                self.schema
+            )));
+        }
+        let expected_pubkey = STANDARD
+            .decode(&self.installation_pubkey_b64)
+            .map_err(|err| CommandError::parse(err.to_string()))?;
+        if expected_pubkey.len() != 32 {
+            return Err(CommandError::parse(
+                "installation public key must be 32 bytes",
+            ));
+        }
+        let store = FileBackedKeyStore::open(key_path)?;
+        if store.pubkey_bytes().as_slice() != expected_pubkey.as_slice() {
+            return Err(CommandError::new(
+                "InstallationKeyMismatch",
+                format!(
+                    "Installation key file {} does not match installation.json public key",
+                    key_path.display()
+                ),
+            ));
+        }
+        shared_core::validate_fingerprint(&self.fingerprint)
+            .map_err(|err| CommandError::parse(err.to_string()))?;
+        if self.hardware_hash_hex != self.fingerprint.hardware_hash {
+            return Err(CommandError::parse(
+                "hardware hash does not match fingerprint",
+            ));
+        }
+        let hardware_hash = decode_hash_hex(&self.hardware_hash_hex)?;
+        let legacy_device_hash = match self.legacy_device_hash_hex {
+            Some(hex) => Some(decode_hash_hex(&hex)?),
+            None => None,
+        };
+        Ok(InstallationState {
+            installation_id: self.installation_id,
+            hardware_hash,
+            installation_pubkey: store.pubkey_bytes(),
+            key_store: Arc::new(store),
+            fingerprint: self.fingerprint,
+            created_at: self.created_at,
+            migrated_from_legacy: true,
+            legacy_device_hash,
+        })
     }
 }
 
@@ -362,21 +524,8 @@ struct InstallationFileV3 {
 }
 
 impl InstallationFileV3 {
-    fn from_state(state: &InstallationState) -> Self {
-        Self {
-            schema: INSTALLATION_SCHEMA_V3,
-            installation_id: state.installation_id.clone(),
-            keypair_b64: STANDARD.encode(state.keypair.to_bytes()),
-            fingerprint: state.fingerprint.clone(),
-            hardware_hash_hex: state.device_hash_hex(),
-            created_at: state.created_at,
-            migrated_from_legacy: state.migrated_from_legacy,
-            legacy_device_hash_hex: state.legacy_device_hash.map(hex::encode),
-        }
-    }
-
-    fn try_into_state(self) -> CmdResult<InstallationState> {
-        if self.schema != INSTALLATION_SCHEMA_V3 {
+    fn try_into_state(self, key_path: &Path) -> CmdResult<InstallationState> {
+        if self.schema != 3 {
             return Err(CommandError::parse(format!(
                 "installation schema {} unsupported",
                 self.schema
@@ -390,6 +539,7 @@ impl InstallationFileV3 {
         }
         let keypair =
             Keypair::from_bytes(&key_bytes).map_err(|err| CommandError::parse(err.to_string()))?;
+        let store = load_or_create_key_store(key_path, Some(keypair))?;
         shared_core::validate_fingerprint(&self.fingerprint)
             .map_err(|err| CommandError::parse(err.to_string()))?;
         if self.hardware_hash_hex != self.fingerprint.hardware_hash {
@@ -405,10 +555,11 @@ impl InstallationFileV3 {
         Ok(InstallationState {
             installation_id: self.installation_id,
             hardware_hash,
-            keypair,
+            installation_pubkey: store.pubkey_bytes(),
+            key_store: Arc::new(store),
             fingerprint: self.fingerprint,
             created_at: self.created_at,
-            migrated_from_legacy: self.migrated_from_legacy,
+            migrated_from_legacy: true,
             legacy_device_hash,
         })
     }
@@ -451,6 +602,8 @@ impl InstallationFileV2 {
             installation_id: Some(self.installation_id),
             created_at: Some(self.created_at),
             keypair: Some(keypair),
+            fingerprint: None,
+            hardware_hash: None,
             legacy_device_hash,
             migrated_from_legacy: true,
         })
@@ -480,6 +633,8 @@ impl InstallationFileV1 {
             installation_id: Some(self.installation_id),
             created_at: Some(self.created_at),
             keypair: None,
+            fingerprint: None,
+            hardware_hash: None,
             legacy_device_hash: Some(device_hash),
             migrated_from_legacy: true,
         })
@@ -506,10 +661,36 @@ fn generate_installation_keypair() -> CmdResult<Keypair> {
     Ok(Keypair { secret, public })
 }
 
+fn load_or_create_key_store(
+    path: &Path,
+    expected_keypair: Option<Keypair>,
+) -> CmdResult<FileBackedKeyStore> {
+    if path.exists() {
+        let store = FileBackedKeyStore::open(path)?;
+        if let Some(keypair) = expected_keypair {
+            if store.pubkey_bytes() != keypair.public.to_bytes() {
+                return Err(CommandError::new(
+                    "InstallationKeyMismatch",
+                    format!(
+                        "Installation key file {} does not match legacy key material in installation.json",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        return Ok(store);
+    }
+
+    let keypair = expected_keypair.unwrap_or(generate_installation_keypair()?);
+    FileBackedKeyStore::create(path, &keypair)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::license::runtime::fingerprint::{HardwareObserver, ObservedHardware};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!("license-device-binding-{}", Uuid::new_v4()));
@@ -526,6 +707,19 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingObserver {
+        observed: ObservedHardware,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HardwareObserver for CountingObserver {
+        fn observe(&self) -> CmdResult<ObservedHardware> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.observed.clone())
+        }
+    }
+
     fn observer(
         machine_id: &str,
         cpu: &str,
@@ -534,11 +728,30 @@ mod tests {
         Arc::new(FixedObserver(ObservedHardware {
             platform: shared_core::Platform::Macos,
             machine_id: Some(machine_id.into()),
+            disk_serial: Some(format!("disk-{machine_id}")),
             cpu_model: Some(cpu.into()),
             hostname: Some(hostname.into()),
             locale: Some("en_US.UTF-8".into()),
             timezone: "-0600".into(),
         }))
+    }
+
+    fn counting_observer(
+        machine_id: &str,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<dyn HardwareObserver + Send + Sync> {
+        Arc::new(CountingObserver {
+            observed: ObservedHardware {
+                platform: shared_core::Platform::Macos,
+                machine_id: Some(machine_id.into()),
+                disk_serial: Some(format!("disk-{machine_id}")),
+                cpu_model: Some("cpu".into()),
+                hostname: Some("host".into()),
+                locale: Some("en_US.UTF-8".into()),
+                timezone: "-0600".into(),
+            },
+            calls,
+        })
     }
 
     #[test]
@@ -549,12 +762,23 @@ mod tests {
             observer("a", "cpu", "host"),
         )
         .expect("should init");
+        let installation_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(INSTALLATION_FILE)).unwrap()).unwrap();
         assert_eq!(store.installation().migrated_from_legacy, false);
         assert!(!store.installation_id().is_empty());
         assert_ne!(store.device_hash(), [0u8; 32]);
         assert_ne!(store.installation_pubkey(), [0u8; 32]);
         shared_core::validate_fingerprint(&store.fingerprint()).expect("fingerprint valid");
         assert!(dir.join(INSTALLATION_FILE).exists());
+        assert!(dir.join(INSTALLATION_KEY_FILE).exists());
+        assert!(installation_json.get("keypair_b64").is_none());
+        assert_eq!(
+            installation_json
+                .get("installation_pubkey_b64")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.is_empty()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -573,6 +797,7 @@ mod tests {
         assert_eq!(store.legacy_device_hash(), Some(bytes));
         assert_ne!(store.device_hash(), bytes);
         assert!(dir.join(INSTALLATION_FILE).exists());
+        assert!(dir.join(INSTALLATION_KEY_FILE).exists());
     }
 
     /// Phase 3 policy: when hardware changes, installation.json is NOT rewritten.
@@ -588,7 +813,7 @@ mod tests {
         let first_hash = first.device_hash_hex();
         let installation_id = first.installation_id();
 
-        let persisted_before: InstallationFileV3 =
+        let persisted_before: InstallationFileV4 =
             serde_json::from_slice(&fs::read(dir.join(INSTALLATION_FILE)).unwrap()).unwrap();
         assert_eq!(persisted_before.hardware_hash_hex, first_hash);
 
@@ -608,7 +833,7 @@ mod tests {
         );
 
         // Phase 3 policy: installation.json must NOT have been updated
-        let persisted_after: InstallationFileV3 =
+        let persisted_after: InstallationFileV4 =
             serde_json::from_slice(&fs::read(dir.join(INSTALLATION_FILE)).unwrap()).unwrap();
         assert_eq!(
             persisted_after.hardware_hash_hex, first_hash,
@@ -651,6 +876,92 @@ mod tests {
     }
 
     #[test]
+    fn reload_preserves_installation_identity() {
+        let dir = temp_dir();
+        let first = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("init");
+        let second = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("reload");
+        assert_eq!(first.installation_id(), second.installation_id());
+        assert_eq!(first.installation_pubkey(), second.installation_pubkey());
+    }
+
+    #[test]
+    fn evidence_new_installation_filesystem_layout() {
+        let dir = temp_dir();
+        let first = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("init");
+        let second = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("reload");
+        let installation_path = dir.join(INSTALLATION_FILE);
+        let key_path = dir.join(INSTALLATION_KEY_FILE);
+        let installation_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&installation_path).unwrap()).unwrap();
+        let key_bytes = fs::read(&key_path).unwrap();
+
+        println!("EVIDENCE_NEW_DIR={}", dir.display());
+        println!(
+            "EVIDENCE_NEW_INSTALLATION_JSON={}",
+            installation_path.display()
+        );
+        println!("EVIDENCE_NEW_INSTALLATION_KEY={}", key_path.display());
+        println!("EVIDENCE_NEW_INSTALLATION_ID={}", first.installation_id());
+        println!(
+            "EVIDENCE_NEW_INSTALLATION_PUBKEY={}",
+            hex::encode(first.installation_pubkey())
+        );
+
+        assert!(installation_json.get("keypair_b64").is_none());
+        assert!(installation_json.get("installation_pubkey_b64").is_some());
+        assert_eq!(key_bytes.len(), 32);
+        assert_eq!(first.installation_id(), second.installation_id());
+        assert_eq!(first.installation_pubkey(), second.installation_pubkey());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            println!("EVIDENCE_NEW_INSTALLATION_KEY_MODE={:o}", mode);
+            assert_eq!(mode & 0o077, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_store_files_use_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let _ = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("init");
+
+        let installation_mode =
+            fs::metadata(dir.join(INSTALLATION_FILE)).unwrap().permissions().mode() & 0o777;
+        let key_mode =
+            fs::metadata(dir.join(INSTALLATION_KEY_FILE)).unwrap().permissions().mode() & 0o777;
+        let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(installation_mode, 0o600);
+        assert_eq!(key_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+    }
+
+    #[test]
     fn migrates_schema_v1_file() {
         let dir = temp_dir();
         let legacy_file = InstallationFileV1 {
@@ -674,6 +985,7 @@ mod tests {
         assert_eq!(store.legacy_device_hash(), Some([0x11u8; 32]));
         assert_eq!(store.installation_id(), "legacy-id");
         assert_eq!(store.fingerprint().version, 2);
+        assert!(dir.join(INSTALLATION_KEY_FILE).exists());
     }
 
     #[test]
@@ -698,10 +1010,60 @@ mod tests {
             observer("a", "cpu", "host"),
         )
         .expect("migrate");
+        let installation_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(store.installation_id(), "legacy-v2");
         assert_eq!(store.legacy_device_hash(), Some([0x22u8; 32]));
         assert_eq!(store.installation_pubkey(), keypair.public.to_bytes());
         assert_eq!(store.fingerprint().version, 2);
+        assert!(dir.join(INSTALLATION_KEY_FILE).exists());
+        assert!(installation_json.get("keypair_b64").is_none());
+    }
+
+    #[test]
+    fn missing_key_file_fails_with_clear_error() {
+        let dir = temp_dir();
+        let store = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("init");
+        assert_ne!(store.installation_pubkey(), [0u8; 32]);
+        fs::remove_file(dir.join(INSTALLATION_KEY_FILE)).unwrap();
+
+        let err = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "MissingInstallationKey");
+    }
+
+    #[test]
+    fn corrupt_key_file_fails_with_clear_error() {
+        let dir = temp_dir();
+        let _ = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .expect("init");
+        fs::write(dir.join(INSTALLATION_KEY_FILE), [0x11u8; 31]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                dir.join(INSTALLATION_KEY_FILE),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+
+        let err = DeviceBindingStore::load_or_init_from_dir_with_observer(
+            &dir,
+            observer("a", "cpu", "host"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidInstallationKey");
     }
 
     #[test]
@@ -715,5 +1077,92 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "Parse");
+    }
+
+    #[test]
+    fn refresh_observed_binding_reuses_cache_within_ttl() {
+        let dir = temp_dir();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = DeviceBindingStore::load_or_init_from_dir_with_observer_and_cache_ttl(
+            &dir,
+            counting_observer("cached-machine", Arc::clone(&calls)),
+            Duration::from_secs(10),
+        )
+        .expect("init");
+
+        let baseline_calls = calls.load(Ordering::SeqCst);
+        assert_eq!(
+            baseline_calls, 2,
+            "bootstrap + initial refresh should collect twice"
+        );
+        store
+            .refresh_observed_binding()
+            .expect("refresh within ttl");
+        store
+            .refresh_observed_binding()
+            .expect("refresh within ttl again");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            baseline_calls,
+            "refreshes inside the TTL must reuse the observed binding cache",
+        );
+    }
+
+    #[test]
+    fn refresh_observed_binding_recollects_after_ttl() {
+        let dir = temp_dir();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = DeviceBindingStore::load_or_init_from_dir_with_observer_and_cache_ttl(
+            &dir,
+            counting_observer("ttl-machine", Arc::clone(&calls)),
+            Duration::from_millis(25),
+        )
+        .expect("init");
+
+        let baseline_calls = calls.load(Ordering::SeqCst);
+        assert_eq!(
+            baseline_calls, 2,
+            "bootstrap + initial refresh should collect twice"
+        );
+        thread::sleep(Duration::from_millis(40));
+        store.refresh_observed_binding().expect("refresh after ttl");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            baseline_calls + 1,
+            "refresh after the TTL must recollect hardware",
+        );
+    }
+
+    #[test]
+    fn concurrent_refreshes_share_single_observation_within_ttl() {
+        let dir = temp_dir();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(
+            DeviceBindingStore::load_or_init_from_dir_with_observer_and_cache_ttl(
+                &dir,
+                counting_observer("parallel-machine", Arc::clone(&calls)),
+                Duration::from_secs(10),
+            )
+            .expect("init"),
+        );
+
+        store.invalidate_observed_binding_cache();
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            workers.push(thread::spawn(move || {
+                store.refresh_observed_binding().expect("parallel refresh");
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let baseline_calls = 2usize;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            baseline_calls + 1,
+            "one extra observation should serve all parallel refreshes after invalidation",
+        );
     }
 }

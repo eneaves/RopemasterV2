@@ -1,13 +1,19 @@
-use ed25519_dalek::{PublicKey, Signature};
-
 // Authoritative wire contract — defined once in shared_core to prevent drift
 // between the app parser and the generator issuer.
+#[cfg(test)]
+use ed25519_dalek::{PublicKey, Signature};
+
+#[cfg(test)]
 pub(crate) const FORMAT_VERSION: u16 = shared_core::licgen_envelope::FORMAT_VERSION;
+#[cfg(test)]
 pub(crate) const LICENSE_MAGIC: &[u8; 6] = shared_core::licgen_envelope::LICENSE_MAGIC;
+#[cfg(test)]
 pub(crate) const LICENSE_VERSION: u16 = shared_core::licgen_envelope::LICENSE_VERSION;
+#[cfg(test)]
 pub(crate) type ModernLicensePayload = shared_core::ModernLicensePayload;
 pub(crate) const DEFAULT_MAX_CLOCK_SKEW_SECS: i64 = 300;
 
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ModernLicenseError {
     #[error("invalid modern license format: {0}")]
@@ -20,6 +26,7 @@ pub(crate) enum ModernLicenseError {
     InvalidSignature,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedModernLicense {
     pub format_version: u16,
@@ -28,6 +35,7 @@ pub(crate) struct ParsedModernLicense {
     pub signature: Vec<u8>,
 }
 
+#[cfg(test)]
 impl ParsedModernLicense {
     pub fn metadata_string(&self, key: &str) -> Option<&str> {
         self.payload.metadata_string(key)
@@ -52,6 +60,7 @@ impl ParsedModernLicense {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_license(bytes: &[u8]) -> Result<ParsedModernLicense, ModernLicenseError> {
     let envelope = shared_core::parse_signed_license_blob(bytes).map_err(map_envelope_error)?;
     let payload_bytes = envelope.payload;
@@ -74,6 +83,7 @@ pub(crate) fn parse_license(bytes: &[u8]) -> Result<ParsedModernLicense, ModernL
     })
 }
 
+#[cfg(test)]
 fn map_envelope_error(err: shared_core::LicenseEnvelopeError) -> ModernLicenseError {
     match err {
         shared_core::LicenseEnvelopeError::BlobTooShort => {

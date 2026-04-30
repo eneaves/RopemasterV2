@@ -135,6 +135,7 @@ pub async fn install_license(
     db: State<'_, Db>,
     input: LicenseInputPayload,
 ) -> CmdResult<LicenseStatusDto> {
+    runtime.invalidate_observed_binding_cache();
     let bytes = match input {
         LicenseInputPayload::Path { path } => {
             std::fs::read(Path::new(&path)).map_err(|err| CommandError::io(err.to_string()))?
@@ -146,17 +147,24 @@ pub async fn install_license(
     let evaluation = runtime.evaluate_license_bytes(&bytes, now)?;
     ensure_installable(evaluation.status)?;
     let license = evaluation.license;
+    let integrity_secret = runtime.binding().key_store().derive_secret(
+        storage::LOCAL_LICENSE_INTEGRITY_PURPOSE,
+        runtime.binding().installation_id().as_bytes(),
+    );
 
     storage::upsert_blob(&db.0, &bytes, now)
         .await
         .map_err(map_sqlx_error)?;
     storage::persist_license_files(&app, &bytes, &license)?;
+    storage::persist_current_license_integrity(&app, &bytes, &integrity_secret)?;
 
     let cache = LicenseCache {
         license: license.clone(),
         installed_at: now,
         last_verified_at: now,
+        raw_bytes: bytes.clone(),
     };
+    runtime.invalidate_observed_binding_cache();
     runtime.update_cache(cache.clone());
 
     Ok(build_status_from_payload(
@@ -215,6 +223,11 @@ pub async fn remove_license(
     runtime.mark_license_missing();
 
     if let Ok(path) = storage::current_license_path(&app) {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    if let Ok(path) = storage::current_license_integrity_path(&app) {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -376,10 +389,7 @@ mod tests {
         );
 
         assert_eq!(targets.exported_path, selected_path);
-        assert_eq!(
-            targets.archived_path,
-            Some(request_dir.join("archive.req"))
-        );
+        assert_eq!(targets.archived_path, Some(request_dir.join("archive.req")));
         assert!(targets.archived_internally);
     }
 
@@ -399,7 +409,10 @@ mod tests {
             fs::read(targets.archived_path.as_ref().expect("archive path")).expect("read archive"),
             bytes
         );
-        assert_eq!(fs::read(&targets.exported_path).expect("read exported"), bytes);
+        assert_eq!(
+            fs::read(&targets.exported_path).expect("read exported"),
+            bytes
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -12,7 +12,12 @@ use licgen_workflows::{
 };
 use uuid::Uuid;
 
-use super::runtime::{device_binding::DeviceBindingStore, keyring::LicenseKeyring, LicenseRuntime};
+use super::runtime::{
+    device_binding::DeviceBindingStore,
+    fingerprint::{HardwareObserver, ObservedHardware},
+    keyring::LicenseKeyring,
+    LicenseRuntime,
+};
 use super::{BindingMatch, LicenseFormatKind, LicenseState};
 
 #[derive(Default)]
@@ -43,10 +48,32 @@ impl LicenseKeyring for FixedKeyring {
     }
 }
 
+#[derive(Clone)]
+struct FixedObserver(ObservedHardware);
+
+impl HardwareObserver for FixedObserver {
+    fn observe(&self) -> super::CmdResult<ObservedHardware> {
+        Ok(self.0.clone())
+    }
+}
+
+fn observer() -> Arc<dyn HardwareObserver + Send + Sync> {
+    Arc::new(FixedObserver(ObservedHardware {
+        platform: shared_core::Platform::Macos,
+        machine_id: Some("machine-phase1".into()),
+        disk_serial: Some("disk-phase1".into()),
+        cpu_model: Some("Apple M1".into()),
+        hostname: Some("phase1-host".into()),
+        locale: Some("en_US.UTF-8".into()),
+        timezone: "-0600".into(),
+    }))
+}
+
 fn runtime_with_issuer_key() -> (LicenseRuntime, Arc<dyn LicenseSigner>, KeyMetadataSnapshot) {
     let dir = std::env::temp_dir().join(format!("phase1-modern-runtime-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp binding dir");
-    let binding = DeviceBindingStore::load_or_init_from_dir(&dir).expect("init device binding");
+    let binding = DeviceBindingStore::load_or_init_from_dir_with_observer(&dir, observer())
+        .expect("init device binding");
 
     let seed = [0x42; 32];
     let signer_keypair = Ed25519Keypair::from_seed_bytes("primary", &seed).expect("issuer keypair");
@@ -58,7 +85,13 @@ fn runtime_with_issuer_key() -> (LicenseRuntime, Arc<dyn LicenseSigner>, KeyMeta
         public_key,
     });
 
-    let runtime = LicenseRuntime::new(binding, keyring, LicenseState::default());
+    let runtime = LicenseRuntime::new(
+        binding,
+        keyring,
+        LicenseState::default(),
+        dir.clone(),
+        licgen_core::verification::VerificationEnvironment::Development,
+    );
     let signer: Arc<dyn LicenseSigner> =
         Arc::new(InMemorySigner::from_seed(&seed, "primary").expect("in-memory signer"));
     let metadata = KeyMetadataSnapshot::new(
@@ -115,6 +148,9 @@ fn phase1_req_issue_install_verify_active() {
         environment: licgen_core::verification::VerificationEnvironment::Development,
         allow_unsafe_plan: false,
         key_metadata,
+        audit_output_path: None,
+        audit_source: None,
+        audit_operator: None,
     })
     .expect("issue modern license");
 

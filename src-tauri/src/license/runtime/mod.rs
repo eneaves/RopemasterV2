@@ -11,6 +11,5 @@ pub mod service;
 pub mod state;
 
 pub use device_binding::DeviceBindingStore;
-pub use key_store::{FileBackedKeyStore, InstallationKeyStore};
 pub use keyring::default_keyring;
 pub use service::{LicenseRuntime, LicenseSummaryStatus};
