@@ -14,9 +14,52 @@ import { getSeries, createSeries, updateSeries, deleteSeries, getDashboardStats,
 import { useAppNavigation } from '@/hooks/useAppNavigation'
 import type { Series, Event, DashboardStats, AuditLogItem } from '../types'
 
+const initialSeries: Series[] = [
+  {
+    id: 1,
+    name: 'Winter Classic 2025',
+    season: 'Season 2025',
+    dateRange: 'Jan - Mar',
+    eventsCount: 8,
+    progress: 75,
+    status: 'active',
+    description: 'Serie de invierno con competencias semanales',
+  },
+  {
+    id: 2,
+    name: 'Summer Shootout',
+    season: 'Season 2025',
+    dateRange: 'Jun - Aug',
+    eventsCount: 12,
+    progress: 30,
+    status: 'active',
+    description: 'Competencia de verano de alto nivel',
+  },
+  {
+    id: 3,
+    name: 'Fall Championship',
+    season: 'Season 2025',
+    dateRange: 'Sep - Nov',
+    eventsCount: 6,
+    progress: 0,
+    status: 'upcoming',
+    description: 'Campeonato de otoño regional',
+  },
+  {
+    id: 4,
+    name: 'Spring Training Series',
+    season: 'Season 2025',
+    dateRange: 'Mar - May',
+    eventsCount: 10,
+    progress: 100,
+    status: 'archived',
+    description: 'Serie de entrenamiento primavera',
+  },
+]
+
 export function Dashboard() {
   const navigateTo = useAppNavigation()
-  const [series, setSeries] = useState<Series[]>([])
+  const [series, setSeries] = useState<Series[]>(initialSeries)
   const [selectedSeries, setSelectedSeries] = useState<Series | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null)
   const [isNewSeriesModalOpen, setIsNewSeriesModalOpen] = useState(false)
@@ -26,36 +69,19 @@ export function Dashboard() {
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | undefined>(undefined)
   const [recentActivity, setRecentActivity] = useState<AuditLogItem[]>([])
 
-  const applyDashboardResults = (results: PromiseSettledResult<unknown>[], options?: { clearSeriesOnFailure?: boolean }) => {
-    const [seriesResult, statsResult, activityResult] = results
-
-    if (seriesResult.status === 'fulfilled') {
-      setSeries((seriesResult.value as any[]).map(mapSeriesRowToSeries))
-    } else {
-      console.error('Failed to load series:', seriesResult.reason)
-      if (options?.clearSeriesOnFailure) setSeries([])
-    }
-
-    if (statsResult.status === 'fulfilled') {
-      setDashboardStats(statsResult.value as DashboardStats)
-    } else {
-      console.error('Failed to load dashboard stats:', statsResult.reason)
-    }
-
-    if (activityResult.status === 'fulfilled') {
-      setRecentActivity(activityResult.value as AuditLogItem[])
-    } else {
-      console.error('Failed to load recent activity:', activityResult.reason)
-    }
-  }
-
   const refreshDashboard = async () => {
-    const results = await Promise.allSettled([
-      getSeries(),
-      getDashboardStats(),
-      getRecentActivity(20),
-    ])
-    applyDashboardResults(results)
+    try {
+      const [seriesData, statsData, activityData] = await Promise.all([
+        getSeries(),
+        getDashboardStats(),
+        getRecentActivity(20)
+      ])
+      setSeries((seriesData as any[]).map(mapSeriesRowToSeries))
+      setDashboardStats(statsData)
+      setRecentActivity(activityData)
+    } catch (e) {
+      console.error('Failed to refresh dashboard:', e)
+    }
   }
 
   const handleViewSeries = (s: Series) => setSelectedSeries(s)
@@ -206,17 +232,25 @@ export function Dashboard() {
     }
   }
 
-  // Load real series from backend on mount; if it fails, keep the UI empty
+  // Load real series from backend on mount; if it fails, keep initialSeries
   useEffect(() => {
     let mounted = true
     ;(async () => {
-      const results = await Promise.allSettled([
-        getSeries(),
-        getDashboardStats(),
-        getRecentActivity(20),
-      ])
-      if (!mounted) return
-      applyDashboardResults(results, { clearSeriesOnFailure: true })
+      try {
+        const [seriesData, statsData, activityData] = await Promise.all([
+            getSeries(),
+            getDashboardStats(),
+            getRecentActivity(20)
+        ])
+        if (!mounted) return
+        setSeries((seriesData as any[]).map(mapSeriesRowToSeries))
+        setDashboardStats(statsData)
+        setRecentActivity(activityData)
+      } catch (e) {
+        // keep initialSeries if fetch fails
+        // log for debugging
+        // console.error('getSeries failed:', e)
+      }
     })()
     return () => {
       mounted = false

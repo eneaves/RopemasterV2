@@ -663,6 +663,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
   const standingsProgress = overallTotalRuns > 0
     ? Math.min((overallCompletedRuns / overallTotalRuns) * 100, 100)
     : 0
+  const leaderTime = globalStandings.length > 0 ? globalStandings[0].totalTime : null
   const currentRoundCompletedStandings = globalStandings.filter(
     (standing) =>
       standing.totalTime !== null &&
@@ -674,27 +675,15 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
     if (best === null || standing.totalTime < best) return standing.totalTime
     return best
   }, null)
-  const hasCurrentRoundLeader = currentRoundLeaderTime !== null
   const currentTeamPriorTotal = currentRun
-    ? (() => {
-        if (currentRoundNumber === 1) return 0
-
-        const priorRuns = allRuns.filter(
-          (run) => run.teamId === currentRun.teamId && run.round < currentRoundNumber,
-        )
-
-        if (priorRuns.some((run) => run.noTime || run.dq)) return null
-
-        const completedPriorRuns = priorRuns.filter(
-          (run) => run.status === 'completed' && run.time !== null,
-        )
-
-        if (completedPriorRuns.length < currentRoundNumber - 1) return null
-
-        return completedPriorRuns.reduce((sum, run) => sum + (run.time ?? 0) + run.penalty, 0)
-      })()
+    ? allRuns.reduce((sum, run) => {
+        if (run.teamId !== currentRun.teamId) return sum
+        if (run.round >= currentRun.round) return sum
+        if (run.status !== 'completed' || run.time === null || run.noTime || run.dq) return sum
+        return sum + run.time + run.penalty
+      }, 0)
     : null
-  const currentRequiredRunToLead = currentRun && hasCurrentRoundLeader && currentTeamPriorTotal !== null
+  const currentRequiredRunToLead = currentRun && currentRoundLeaderTime !== null && currentTeamPriorTotal !== null
     ? currentRoundLeaderTime - currentTeamPriorTotal - 0.001
     : null
   const isCompactView = !isFullscreen
@@ -1231,10 +1220,10 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
 
           {/* Lower: Results — fullscreen only */}
           {isFullscreen && (
-          <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex flex-col">
           {/* Results Tabs */}
-          <div className="bg-card rounded-xl border border-border shadow-sm flex-1 min-h-0 flex flex-col overflow-hidden">
-             <Tabs defaultValue="round" className="flex-1 min-h-0 flex flex-col">
+          <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col overflow-hidden">
+             <Tabs defaultValue="round" className="flex flex-col">
             <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-muted/10 flex-shrink-0">
               <h3 className="font-semibold text-foreground">Resultados</h3>
               <div className="flex items-center gap-3">
@@ -1254,8 +1243,8 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
               </div>
             </div>
 
-            <TabsContent value="round" className="overflow-hidden flex-1 min-h-0 data-[state=inactive]:hidden data-[state=active]:flex data-[state=active]:flex-col p-0 m-0">
-              <div className="h-0 flex-1 min-h-0 overflow-y-auto">
+            <TabsContent value="round" className="overflow-hidden flex flex-col p-0 m-0">
+              <div className="max-h-[34vh] overflow-y-auto">
               <Table className="table-fixed w-full">
                 <colgroup>
                   <col style={{width:'5%'}} />
@@ -1335,7 +1324,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
               </div>
             </TabsContent>
 
-            <TabsContent value="global" className="overflow-hidden flex-1 min-h-0 data-[state=inactive]:hidden data-[state=active]:flex data-[state=active]:flex-col p-0 m-0">
+            <TabsContent value="global" className="overflow-hidden flex flex-col p-0 m-0">
               {/* ── Summary bar (single row) ── */}
               <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-border flex-wrap">
                 {/* Status badge */}
@@ -1378,7 +1367,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                         {globalStandings[0].team.header} ({globalStandings[0].totalTime.toFixed(2)}s)
                       </strong>
                     </span>
-                    {currentRun && !noTime && !dq && hasCurrentRoundLeader && currentRequiredRunToLead !== null && (
+                    {currentRun && !noTime && !dq && (
                       <>
                         <span className="text-border">·</span>
                         <span className="text-xs text-muted-foreground whitespace-nowrap">
@@ -1386,7 +1375,9 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                           <strong className="text-primary">
                             {currentRun.team.header} & {currentRun.team.heeler}
                           </strong>{' '}
-                          {currentRequiredRunToLead <= 0 ? (
+                          {currentRoundLeaderTime === null ? (
+                            <strong className="text-muted-foreground">esperando primer run de la ronda</strong>
+                          ) : currentRequiredRunToLead !== null && currentRequiredRunToLead <= 0 ? (
                             <strong className="text-rose-600">ya no alcanza al líder</strong>
                           ) : (
                             <>
@@ -1402,7 +1393,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                   </>
                 )}
               </div>
-              <div className="h-0 flex-1 min-h-0 overflow-y-auto">
+              <div className="max-h-[34vh] overflow-y-auto">
                <Table className="table-fixed">
                 <colgroup>
                   <col className="w-10" />
@@ -1464,12 +1455,9 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
                             Líder
                           </span>
-                        ) : hasCurrentRoundLeader &&
-                          s.totalTime !== null &&
-                          !s.eliminatedRound &&
-                          s.roundsCompleted >= currentRoundNumber ? (
+                        ) : leaderTime !== null && s.totalTime !== null && !s.eliminatedRound ? (
                           <span className="font-mono text-sm font-medium text-rose-500">
-                            {formatSignedSeconds(s.totalTime - currentRoundLeaderTime)}
+                            {formatSignedSeconds(s.totalTime - leaderTime)}
                           </span>
                         ) : (
                           <span className="text-muted-foreground">—</span>
