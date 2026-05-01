@@ -89,15 +89,6 @@ export const generateDrawBatch = (opts: {
 export const getStandings = (eventId: number) =>
   invoke<any[]>('get_standings', { eventId });
 
-export const getSeriesResultsSummary = (seriesId: number) =>
-  invoke<any>('get_series_results_summary', { seriesId });
-
-export const getSeriesRoperRankings = (seriesId: number) =>
-  invoke<any[]>('get_series_roper_rankings', { seriesId });
-
-export const getSeriesRoperProfile = (seriesId: number, roperId: number) =>
-  invoke<any | null>('get_series_roper_profile', { seriesId, roperId });
-
 export const getDraw = (eventId: number, round: number) =>
   invoke<any[]>('get_draw', { eventId, round });
 

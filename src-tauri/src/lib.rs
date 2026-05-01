@@ -920,10 +920,9 @@ struct PayoutAllocation {
     amount: f64,
 }
 
-async fn get_payout_breakdown_internal(
-    pool: &SqlitePool,
-    event_id: i64,
-) -> Result<PayoutBreakdown, String> {
+#[tauri::command]
+async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<PayoutBreakdown, String> {
+    db.require_license()?;
     // 1. Get Event Details (Entry Fee, Prize Pool)
     // IMPORTANT: We need to satisfy EventRow struct which expects teams_count and pot.
     // We select 0 for them here because we calculate them manually below.
@@ -941,7 +940,7 @@ async fn get_payout_breakdown_internal(
         "#,
     )
     .bind(event_id)
-    .fetch_one(pool)
+    .fetch_one(&db.0)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -956,7 +955,7 @@ async fn get_payout_breakdown_internal(
         "#,
     )
     .bind(event_id)
-    .fetch_one(pool)
+    .fetch_one(&db.0)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -975,7 +974,7 @@ async fn get_payout_breakdown_internal(
         "SELECT id, event_id, position, percentage, is_active, created_at FROM payoff_rule WHERE event_id = ?1 AND is_active = 1 ORDER BY position ASC"
     )
     .bind(event_id)
-    .fetch_all(pool)
+    .fetch_all(&db.0)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -996,12 +995,6 @@ async fn get_payout_breakdown_internal(
         deduction_pct,
         payouts,
     })
-}
-
-#[tauri::command]
-async fn get_payout_breakdown(db: State<'_, Db>, event_id: i64) -> Result<PayoutBreakdown, String> {
-    db.require_license()?;
-    get_payout_breakdown_internal(&db.0, event_id).await
 }
 
 /* ------------------- RUNS (CAPTURE) ------------------- */
@@ -2896,43 +2889,11 @@ struct StandingAgg {
     best_time: Option<f64>,
 }
 
-fn compare_standing_agg(a: &StandingAgg, b: &StandingAgg) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    let completed_runs = b.completed_runs.cmp(&a.completed_runs);
-    if completed_runs != Ordering::Equal {
-        return completed_runs;
-    }
-
-    match (&a.total_time, &b.total_time) {
-        (Some(ta), Some(tb)) => {
-            let total_time = ta.partial_cmp(tb).unwrap_or(Ordering::Equal);
-            if total_time != Ordering::Equal {
-                return total_time;
-            }
-        }
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
-        (None, None) => {}
-    }
-
-    match (&a.best_time, &b.best_time) {
-        (Some(ta), Some(tb)) => {
-            let best_time = ta.partial_cmp(tb).unwrap_or(Ordering::Equal);
-            if best_time != Ordering::Equal {
-                return best_time;
-            }
-        }
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
-        (None, None) => {}
-    }
-
-    a.team_id.cmp(&b.team_id)
-}
-
-async fn load_standing_aggs(pool: &SqlitePool, event_id: i64) -> Result<Vec<StandingAgg>, String> {
-    sqlx::query_as::<_, StandingAgg>(
+#[tauri::command]
+async fn get_standings(db: State<'_, Db>, event_id: i64) -> Result<Vec<StandingRow>, String> {
+    db.require_license()?;
+    // Agregados por equipo para el evento
+    let mut rows: Vec<StandingAgg> = sqlx::query_as::<_, StandingAgg>(
         r#"
         SELECT
           r.team_id                                        AS team_id,
@@ -2953,20 +2914,54 @@ async fn load_standing_aggs(pool: &SqlitePool, event_id: i64) -> Result<Vec<Stan
         "#
     )
     .bind(event_id)
-    .fetch_all(pool)
+    .fetch_all(&db.0)
     .await
-    .map_err(|e| e.to_string())
-}
-
-async fn get_standings_internal(pool: &SqlitePool, event_id: i64) -> Result<Vec<StandingRow>, String> {
-    let mut rows = load_standing_aggs(pool, event_id).await?;
+    .map_err(|e| e.to_string())?;
 
     // Si no hay runs, regresamos vacío
     if rows.is_empty() {
         return Ok(vec![]);
     }
 
-    rows.sort_by(compare_standing_agg);
+    // Ordenar: completed_runs desc (pero 0 al final), luego total_time asc (nulos al final),
+    // luego best_time asc (nulos al final), y por último team_id asc.
+    rows.sort_by(|a, b| {
+        use std::cmp::Ordering;
+        // completed desc
+        let cr = b.completed_runs.cmp(&a.completed_runs);
+        if cr != Ordering::Equal {
+            return cr;
+        }
+
+        // total_time asc (None al final)
+        match (&a.total_time, &b.total_time) {
+            (Some(ta), Some(tb)) => {
+                let ot = ta.partial_cmp(tb).unwrap_or(Ordering::Equal);
+                if ot != Ordering::Equal {
+                    return ot;
+                }
+            }
+            (Some(_), None) => return Ordering::Less,
+            (None, Some(_)) => return Ordering::Greater,
+            (None, None) => {}
+        }
+
+        // best_time asc (None al final)
+        match (&a.best_time, &b.best_time) {
+            (Some(ta), Some(tb)) => {
+                let ob = ta.partial_cmp(tb).unwrap_or(Ordering::Equal);
+                if ob != Ordering::Equal {
+                    return ob;
+                }
+            }
+            (Some(_), None) => return Ordering::Less,
+            (None, Some(_)) => return Ordering::Greater,
+            (None, None) => {}
+        }
+
+        // último desempate: team_id
+        a.team_id.cmp(&b.team_id)
+    });
 
     // Asigna rank (1-based).
     let standings: Vec<StandingRow> = rows
@@ -2987,595 +2982,6 @@ async fn get_standings_internal(pool: &SqlitePool, event_id: i64) -> Result<Vec<
         .collect();
 
     Ok(standings)
-}
-
-#[tauri::command]
-async fn get_standings(db: State<'_, Db>, event_id: i64) -> Result<Vec<StandingRow>, String> {
-    db.require_license()?;
-    get_standings_internal(&db.0, event_id).await
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct ClosedSeriesEventRow {
-    id: i64,
-    name: String,
-    teams_registered: i64,
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct EventTeamDetailRow {
-    team_id: i64,
-    header_id: i64,
-    heeler_id: i64,
-    header_name: String,
-    heeler_name: String,
-    header_specialty: String,
-    heeler_specialty: String,
-}
-
-#[derive(Clone)]
-struct SeriesTeamPerformance {
-    event_id: i64,
-    event_name: String,
-    header_id: i64,
-    heeler_id: i64,
-    header_name: String,
-    heeler_name: String,
-    header_specialty: String,
-    heeler_specialty: String,
-    finish_rank: i64,
-    total_time: Option<f64>,
-    completed_runs: i64,
-    nt_cnt: i64,
-    dq_cnt: i64,
-    avg_time: Option<f64>,
-    best_time: Option<f64>,
-    team_payout: f64,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct SeriesSummaryTopRoper {
-    roper_id: i64,
-    name: String,
-    avg_time: Option<f64>,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct SeriesResultsSummary {
-    closed_events: i64,
-    unique_ropers: i64,
-    teams_registered: i64,
-    valid_runs: i64,
-    total_distributed: f64,
-    avg_series_time: Option<f64>,
-    clean_run_rate: Option<f64>,
-    fastest_roper_name: Option<String>,
-    fastest_avg_time: Option<f64>,
-    most_wins_roper_name: Option<String>,
-    most_wins_count: i64,
-    top_ropers: Vec<SeriesSummaryTopRoper>,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct SeriesRoperRankingRow {
-    roper_id: i64,
-    roper_name: String,
-    specialty: String,
-    events_played: i64,
-    partners_count: i64,
-    valid_runs: i64,
-    avg_time: Option<f64>,
-    best_run: Option<f64>,
-    wins: i64,
-    podiums: i64,
-    nt_count: i64,
-    dq_count: i64,
-    earnings: f64,
-    rank: i64,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct SeriesRoperProfileHistoryEntry {
-    event_id: i64,
-    event_name: String,
-    partner_name: String,
-    finish_rank: Option<i64>,
-    total_time: Option<f64>,
-    avg_time: Option<f64>,
-    earnings: f64,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct SeriesRoperProfile {
-    roper_id: i64,
-    roper_name: String,
-    specialty: String,
-    rank: i64,
-    avg_time: Option<f64>,
-    events_played: i64,
-    wins: i64,
-    podiums: i64,
-    earnings: f64,
-    best_partner_name: Option<String>,
-    best_event_name: Option<String>,
-    best_run: Option<f64>,
-    history: Vec<SeriesRoperProfileHistoryEntry>,
-}
-
-struct RoperAccumulator {
-    roper_id: i64,
-    roper_name: String,
-    specialty: String,
-    event_ids: HashSet<i64>,
-    partner_ids: HashSet<i64>,
-    valid_runs: i64,
-    total_time_sum: f64,
-    best_run: Option<f64>,
-    wins: i64,
-    podiums: i64,
-    nt_count: i64,
-    dq_count: i64,
-    earnings: f64,
-    history: Vec<SeriesRoperProfileHistoryEntry>,
-}
-
-struct SeriesResultsDataset {
-    summary: SeriesResultsSummary,
-    rankings: Vec<SeriesRoperRankingRow>,
-    profiles: HashMap<i64, SeriesRoperProfile>,
-}
-
-async fn load_closed_series_events(
-    pool: &SqlitePool,
-    series_id: i64,
-) -> Result<Vec<ClosedSeriesEventRow>, String> {
-    sqlx::query_as::<_, ClosedSeriesEventRow>(
-        r#"
-        SELECT
-            e.id,
-            e.name,
-            (
-                SELECT COUNT(*)
-                FROM team t
-                WHERE t.event_id = e.id AND t.status = 'active'
-            ) AS teams_registered
-        FROM event e
-        WHERE e.series_id = ?1
-          AND e.is_deleted = 0
-          AND e.status IN ('completed', 'locked')
-        ORDER BY e.date ASC, e.id ASC
-        "#,
-    )
-    .bind(series_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())
-}
-
-async fn load_event_team_details(
-    pool: &SqlitePool,
-    event_id: i64,
-) -> Result<HashMap<i64, EventTeamDetailRow>, String> {
-    let rows = sqlx::query_as::<_, EventTeamDetailRow>(
-        r#"
-        SELECT
-            t.id AS team_id,
-            t.header_id AS header_id,
-            t.heeler_id AS heeler_id,
-            (rh.first_name || ' ' || rh.last_name) AS header_name,
-            (rhe.first_name || ' ' || rhe.last_name) AS heeler_name,
-            rh.specialty AS header_specialty,
-            rhe.specialty AS heeler_specialty
-        FROM team t
-        JOIN roper rh ON rh.id = t.header_id
-        JOIN roper rhe ON rhe.id = t.heeler_id
-        WHERE t.event_id = ?1
-          AND t.status = 'active'
-        "#,
-    )
-    .bind(event_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| (row.team_id, row))
-        .collect::<HashMap<_, _>>())
-}
-
-fn update_best_time(current: Option<f64>, candidate: Option<f64>) -> Option<f64> {
-    match (current, candidate) {
-        (Some(current_value), Some(candidate_value)) => Some(current_value.min(candidate_value)),
-        (None, Some(candidate_value)) => Some(candidate_value),
-        (Some(current_value), None) => Some(current_value),
-        (None, None) => None,
-    }
-}
-
-fn compare_rankings(
-    a: &SeriesRoperRankingRow,
-    b: &SeriesRoperRankingRow,
-) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    match (a.avg_time, b.avg_time) {
-        (Some(a_time), Some(b_time)) => {
-            let avg = a_time.partial_cmp(&b_time).unwrap_or(Ordering::Equal);
-            if avg != Ordering::Equal {
-                return avg;
-            }
-        }
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
-        (None, None) => {}
-    }
-
-    let wins = b.wins.cmp(&a.wins);
-    if wins != Ordering::Equal {
-        return wins;
-    }
-
-    let podiums = b.podiums.cmp(&a.podiums);
-    if podiums != Ordering::Equal {
-        return podiums;
-    }
-
-    match (a.best_run, b.best_run) {
-        (Some(a_run), Some(b_run)) => {
-            let best = a_run.partial_cmp(&b_run).unwrap_or(Ordering::Equal);
-            if best != Ordering::Equal {
-                return best;
-            }
-        }
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
-        (None, None) => {}
-    }
-
-    let earnings = b
-        .earnings
-        .partial_cmp(&a.earnings)
-        .unwrap_or(Ordering::Equal);
-    if earnings != Ordering::Equal {
-        return earnings;
-    }
-
-    a.roper_id.cmp(&b.roper_id)
-}
-
-fn compare_history_entries(
-    a: &SeriesRoperProfileHistoryEntry,
-    b: &SeriesRoperProfileHistoryEntry,
-) -> std::cmp::Ordering {
-    let rank_a = a.finish_rank.unwrap_or(i64::MAX);
-    let rank_b = b.finish_rank.unwrap_or(i64::MAX);
-    rank_a
-        .cmp(&rank_b)
-        .then_with(|| match (a.avg_time, b.avg_time) {
-            (Some(a_time), Some(b_time)) => a_time
-                .partial_cmp(&b_time)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        })
-        .then_with(|| {
-            b.earnings
-                .partial_cmp(&a.earnings)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-}
-
-fn choose_best_partner(accumulator: &RoperAccumulator) -> Option<String> {
-    accumulator
-        .history
-        .iter()
-        .min_by(|a, b| compare_history_entries(a, b))
-        .map(|entry| entry.partner_name.clone())
-}
-
-fn choose_best_event(accumulator: &RoperAccumulator) -> Option<String> {
-    accumulator
-        .history
-        .iter()
-        .min_by(|a, b| compare_history_entries(a, b))
-        .map(|entry| entry.event_name.clone())
-}
-
-fn apply_roper_participation(
-    accumulators: &mut HashMap<i64, RoperAccumulator>,
-    performance: &SeriesTeamPerformance,
-    roper_id: i64,
-    roper_name: &str,
-    specialty: &str,
-    partner_id: i64,
-    partner_name: &str,
-    payout_share: f64,
-) {
-    let accumulator = accumulators.entry(roper_id).or_insert_with(|| RoperAccumulator {
-        roper_id,
-        roper_name: roper_name.to_string(),
-        specialty: specialty.to_string(),
-        event_ids: HashSet::new(),
-        partner_ids: HashSet::new(),
-        valid_runs: 0,
-        total_time_sum: 0.0,
-        best_run: None,
-        wins: 0,
-        podiums: 0,
-        nt_count: 0,
-        dq_count: 0,
-        earnings: 0.0,
-        history: Vec::new(),
-    });
-
-    accumulator.event_ids.insert(performance.event_id);
-    accumulator.partner_ids.insert(partner_id);
-    accumulator.valid_runs += performance.completed_runs;
-    accumulator.total_time_sum += performance.total_time.unwrap_or(0.0);
-    accumulator.best_run = update_best_time(accumulator.best_run, performance.best_time);
-    accumulator.wins += if performance.finish_rank == 1 { 1 } else { 0 };
-    accumulator.podiums += if performance.finish_rank <= 3 { 1 } else { 0 };
-    accumulator.nt_count += performance.nt_cnt;
-    accumulator.dq_count += performance.dq_cnt;
-    accumulator.earnings += payout_share;
-    accumulator.history.push(SeriesRoperProfileHistoryEntry {
-        event_id: performance.event_id,
-        event_name: performance.event_name.clone(),
-        partner_name: partner_name.to_string(),
-        finish_rank: Some(performance.finish_rank),
-        total_time: performance.total_time,
-        avg_time: performance.avg_time,
-        earnings: payout_share,
-    });
-}
-
-async fn build_series_results_dataset(
-    pool: &SqlitePool,
-    series_id: i64,
-) -> Result<SeriesResultsDataset, String> {
-    let closed_events = load_closed_series_events(pool, series_id).await?;
-    let teams_registered = closed_events
-        .iter()
-        .map(|event| event.teams_registered)
-        .sum::<i64>();
-
-    let mut performances: Vec<SeriesTeamPerformance> = Vec::new();
-    for event in &closed_events {
-        let standings = get_standings_internal(pool, event.id).await?;
-        if standings.is_empty() {
-            continue;
-        }
-        let payout_breakdown = get_payout_breakdown_internal(pool, event.id).await?;
-        let payout_map = payout_breakdown
-            .payouts
-            .into_iter()
-            .map(|payout| (payout.place, payout.amount))
-            .collect::<HashMap<_, _>>();
-        let team_details = load_event_team_details(pool, event.id).await?;
-
-        for standing in standings {
-            if let Some(team_detail) = team_details.get(&standing.team_id) {
-                performances.push(SeriesTeamPerformance {
-                    event_id: event.id,
-                    event_name: event.name.clone(),
-                    header_id: team_detail.header_id,
-                    heeler_id: team_detail.heeler_id,
-                    header_name: team_detail.header_name.clone(),
-                    heeler_name: team_detail.heeler_name.clone(),
-                    header_specialty: team_detail.header_specialty.clone(),
-                    heeler_specialty: team_detail.heeler_specialty.clone(),
-                    finish_rank: standing.rank,
-                    total_time: standing.total_time,
-                    completed_runs: standing.completed_runs,
-                    nt_cnt: standing.nt_cnt,
-                    dq_cnt: standing.dq_cnt,
-                    avg_time: standing.avg_time,
-                    best_time: standing.best_time,
-                    team_payout: *payout_map.get(&standing.rank).unwrap_or(&0.0),
-                });
-            }
-        }
-    }
-
-    let mut accumulators: HashMap<i64, RoperAccumulator> = HashMap::new();
-    let mut valid_runs = 0i64;
-    let mut total_attempts = 0i64;
-    let mut total_time_sum = 0.0f64;
-    let mut total_distributed = 0.0f64;
-
-    for performance in &performances {
-        valid_runs += performance.completed_runs;
-        total_attempts += performance.completed_runs + performance.nt_cnt + performance.dq_cnt;
-        total_time_sum += performance.total_time.unwrap_or(0.0);
-        total_distributed += performance.team_payout;
-
-        let payout_share = performance.team_payout / 2.0;
-        apply_roper_participation(
-            &mut accumulators,
-            performance,
-            performance.header_id,
-            &performance.header_name,
-            &performance.header_specialty,
-            performance.heeler_id,
-            &performance.heeler_name,
-            payout_share,
-        );
-        apply_roper_participation(
-            &mut accumulators,
-            performance,
-            performance.heeler_id,
-            &performance.heeler_name,
-            &performance.heeler_specialty,
-            performance.header_id,
-            &performance.header_name,
-            payout_share,
-        );
-    }
-
-    let mut rankings = accumulators
-        .values()
-        .map(|accumulator| SeriesRoperRankingRow {
-            roper_id: accumulator.roper_id,
-            roper_name: accumulator.roper_name.clone(),
-            specialty: accumulator.specialty.clone(),
-            events_played: accumulator.event_ids.len() as i64,
-            partners_count: accumulator.partner_ids.len() as i64,
-            valid_runs: accumulator.valid_runs,
-            avg_time: if accumulator.valid_runs > 0 {
-                Some(accumulator.total_time_sum / accumulator.valid_runs as f64)
-            } else {
-                None
-            },
-            best_run: accumulator.best_run,
-            wins: accumulator.wins,
-            podiums: accumulator.podiums,
-            nt_count: accumulator.nt_count,
-            dq_count: accumulator.dq_count,
-            earnings: accumulator.earnings,
-            rank: 0,
-        })
-        .collect::<Vec<_>>();
-
-    rankings.sort_by(compare_rankings);
-    for (index, row) in rankings.iter_mut().enumerate() {
-        row.rank = (index + 1) as i64;
-    }
-
-    let ranking_index = rankings
-        .iter()
-        .map(|row| (row.roper_id, row.clone()))
-        .collect::<HashMap<_, _>>();
-
-    let mut profiles = HashMap::new();
-    for (roper_id, accumulator) in accumulators {
-        let rank_row = ranking_index
-            .get(&roper_id)
-            .cloned()
-            .ok_or_else(|| "No se pudo resolver el ranking del roper.".to_string())?;
-
-        let mut history = accumulator.history.clone();
-        history.sort_by(|a, b| {
-            a.event_name
-                .cmp(&b.event_name)
-                .then_with(|| a.finish_rank.unwrap_or(i64::MAX).cmp(&b.finish_rank.unwrap_or(i64::MAX)))
-        });
-
-        profiles.insert(
-            roper_id,
-            SeriesRoperProfile {
-                roper_id,
-                roper_name: rank_row.roper_name.clone(),
-                specialty: rank_row.specialty.clone(),
-                rank: rank_row.rank,
-                avg_time: rank_row.avg_time,
-                events_played: rank_row.events_played,
-                wins: rank_row.wins,
-                podiums: rank_row.podiums,
-                earnings: rank_row.earnings,
-                best_partner_name: choose_best_partner(&accumulator),
-                best_event_name: choose_best_event(&accumulator),
-                best_run: rank_row.best_run,
-                history,
-            },
-        );
-    }
-
-    let fastest = rankings.iter().find(|row| row.avg_time.is_some());
-    let most_wins = rankings.iter().max_by_key(|row| row.wins);
-    let summary = SeriesResultsSummary {
-        closed_events: closed_events.len() as i64,
-        unique_ropers: rankings.len() as i64,
-        teams_registered,
-        valid_runs,
-        total_distributed,
-        avg_series_time: if valid_runs > 0 {
-            Some(total_time_sum / valid_runs as f64)
-        } else {
-            None
-        },
-        clean_run_rate: if total_attempts > 0 {
-            Some((valid_runs as f64 / total_attempts as f64) * 100.0)
-        } else {
-            None
-        },
-        fastest_roper_name: fastest.map(|row| row.roper_name.clone()),
-        fastest_avg_time: fastest.and_then(|row| row.avg_time),
-        most_wins_roper_name: most_wins.map(|row| row.roper_name.clone()),
-        most_wins_count: most_wins.map(|row| row.wins).unwrap_or(0),
-        top_ropers: rankings
-            .iter()
-            .take(5)
-            .map(|row| SeriesSummaryTopRoper {
-                roper_id: row.roper_id,
-                name: row.roper_name.clone(),
-                avg_time: row.avg_time,
-            })
-            .collect(),
-    };
-
-    Ok(SeriesResultsDataset {
-        summary,
-        rankings,
-        profiles,
-    })
-}
-
-async fn get_series_results_summary_internal(
-    pool: &SqlitePool,
-    series_id: i64,
-) -> Result<SeriesResultsSummary, String> {
-    build_series_results_dataset(pool, series_id)
-        .await
-        .map(|dataset| dataset.summary)
-}
-
-async fn get_series_roper_rankings_internal(
-    pool: &SqlitePool,
-    series_id: i64,
-) -> Result<Vec<SeriesRoperRankingRow>, String> {
-    build_series_results_dataset(pool, series_id)
-        .await
-        .map(|dataset| dataset.rankings)
-}
-
-async fn get_series_roper_profile_internal(
-    pool: &SqlitePool,
-    series_id: i64,
-    roper_id: i64,
-) -> Result<Option<SeriesRoperProfile>, String> {
-    build_series_results_dataset(pool, series_id)
-        .await
-        .map(|dataset| dataset.profiles.get(&roper_id).cloned())
-}
-
-#[tauri::command]
-async fn get_series_results_summary(
-    db: State<'_, Db>,
-    series_id: i64,
-) -> Result<SeriesResultsSummary, String> {
-    db.require_license()?;
-    get_series_results_summary_internal(&db.0, series_id).await
-}
-
-#[tauri::command]
-async fn get_series_roper_rankings(
-    db: State<'_, Db>,
-    series_id: i64,
-) -> Result<Vec<SeriesRoperRankingRow>, String> {
-    db.require_license()?;
-    get_series_roper_rankings_internal(&db.0, series_id).await
-}
-
-#[tauri::command]
-async fn get_series_roper_profile(
-    db: State<'_, Db>,
-    series_id: i64,
-    roper_id: i64,
-) -> Result<Option<SeriesRoperProfile>, String> {
-    db.require_license()?;
-    get_series_roper_profile_internal(&db.0, series_id, roper_id).await
 }
 
 /* ------------------- DRAW READ ------------------- */
@@ -4318,9 +3724,6 @@ pub fn run() {
             generate_draw_batch,
             // standings
             get_standings,
-            get_series_results_summary,
-            get_series_roper_rankings,
-            get_series_roper_profile,
             // draw
             get_draw,
             update_event_status,
@@ -4814,163 +4217,4 @@ mod tests {
         .await
         .expect("team should succeed once roster is active");
     }
-
-    #[tokio::test]
-    async fn series_results_only_use_closed_events_and_split_team_payouts() {
-        let db = setup_test_db().await;
-        let series_id = create_series(&db, "Serie Stats").await;
-
-        let closed_event_id = create_event_record(&db, series_id, "Evento Cerrado", 2, "completed").await;
-        let active_event_id = create_event_record(&db, series_id, "Evento Activo", 1, "active").await;
-
-        let header_closed =
-            create_roper_record(&db, "Ana", "Header", "header", 4.0, "stats-ana@example.com").await;
-        let heeler_closed =
-            create_roper_record(&db, "Ben", "Heeler", "heeler", 4.5, "stats-ben@example.com").await;
-        let header_active =
-            create_roper_record(&db, "Caro", "Header", "header", 5.0, "stats-caro@example.com").await;
-        let heeler_active =
-            create_roper_record(&db, "Dani", "Heeler", "heeler", 5.0, "stats-dani@example.com").await;
-
-        let closed_team = create_team_record(
-            &db,
-            closed_event_id,
-            header_closed,
-            heeler_closed,
-            8.5,
-            "active",
-        )
-        .await;
-        let active_team = create_team_record(
-            &db,
-            active_event_id,
-            header_active,
-            heeler_active,
-            9.0,
-            "active",
-        )
-        .await;
-
-        create_run_record(
-            &db,
-            closed_event_id,
-            closed_team,
-            1,
-            1,
-            Some(6.10),
-            0.0,
-            false,
-            false,
-            "completed",
-        )
-        .await;
-        create_run_record(
-            &db,
-            closed_event_id,
-            closed_team,
-            2,
-            1,
-            Some(6.00),
-            0.0,
-            false,
-            false,
-            "completed",
-        )
-        .await;
-        create_payoff_rule_record(&db, closed_event_id, 1, 1.0).await;
-
-        create_run_record(
-            &db,
-            active_event_id,
-            active_team,
-            1,
-            1,
-            Some(5.00),
-            0.0,
-            false,
-            false,
-            "completed",
-        )
-        .await;
-        create_payoff_rule_record(&db, active_event_id, 1, 1.0).await;
-
-        let summary = get_series_results_summary_internal(&db.0, series_id)
-            .await
-            .expect("series summary");
-        assert_eq!(summary.closed_events, 1);
-        assert_eq!(summary.unique_ropers, 2);
-        assert_eq!(summary.teams_registered, 1);
-        assert_eq!(summary.valid_runs, 2);
-        assert!(
-            (summary.total_distributed - 675.0).abs() < 0.01,
-            "expected only closed-event payout to count"
-        );
-
-        let rankings = get_series_roper_rankings_internal(&db.0, series_id)
-            .await
-            .expect("series rankings");
-        assert_eq!(rankings.len(), 2);
-        assert!(rankings.iter().all(|row| row.events_played == 1));
-        assert!(rankings.iter().all(|row| (row.earnings - 337.5).abs() < 0.01));
-    }
-
-    #[tokio::test]
-    async fn series_roper_profile_returns_real_history_and_best_partner() {
-        let db = setup_test_db().await;
-        let series_id = create_series(&db, "Serie Perfil").await;
-
-        let event_one = create_event_record(&db, series_id, "Evento Uno", 1, "completed").await;
-        let event_two = create_event_record(&db, series_id, "Evento Dos", 1, "locked").await;
-
-        let anchor_header =
-            create_roper_record(&db, "Alex", "Anchor", "header", 4.0, "anchor@example.com").await;
-        let partner_one =
-            create_roper_record(&db, "Ben", "Partner", "heeler", 4.0, "partner-one@example.com").await;
-        let partner_two =
-            create_roper_record(&db, "Cody", "Partner", "heeler", 4.0, "partner-two@example.com").await;
-
-        let team_one = create_team_record(&db, event_one, anchor_header, partner_one, 8.0, "active").await;
-        let team_two = create_team_record(&db, event_two, anchor_header, partner_two, 8.0, "active").await;
-
-        create_run_record(
-            &db,
-            event_one,
-            team_one,
-            1,
-            1,
-            Some(5.80),
-            0.0,
-            false,
-            false,
-            "completed",
-        )
-        .await;
-        create_run_record(
-            &db,
-            event_two,
-            team_two,
-            1,
-            1,
-            Some(6.40),
-            0.0,
-            false,
-            false,
-            "completed",
-        )
-        .await;
-        create_payoff_rule_record(&db, event_one, 1, 1.0).await;
-        create_payoff_rule_record(&db, event_two, 1, 1.0).await;
-
-        let profile = get_series_roper_profile_internal(&db.0, series_id, anchor_header)
-            .await
-            .expect("roper profile")
-            .expect("profile should exist");
-        assert_eq!(profile.history.len(), 2);
-        assert!(profile.best_partner_name.is_some());
-        assert!(profile.best_event_name.is_some());
-        assert_eq!(profile.best_run, Some(5.8));
-        assert!(profile.history.iter().any(|entry| entry.partner_name == "Ben Partner"));
-        assert!(profile.history.iter().any(|entry| entry.partner_name == "Cody Partner"));
-    }
-
 }
