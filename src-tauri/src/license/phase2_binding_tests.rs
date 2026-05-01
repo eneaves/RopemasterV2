@@ -67,7 +67,6 @@ fn observer(
     Arc::new(FixedObserver(ObservedHardware {
         platform: shared_core::Platform::Macos,
         machine_id: Some(machine_id.into()),
-        disk_serial: Some(format!("disk-{machine_id}")),
         cpu_model: Some(cpu.into()),
         hostname: Some(hostname.into()),
         locale: Some("en_US.UTF-8".into()),
@@ -91,13 +90,7 @@ fn runtime_with_observer(
         key_id: "primary",
         public_key,
     });
-    let runtime = LicenseRuntime::new(
-        binding,
-        keyring,
-        LicenseState::default(),
-        dir.to_path_buf(),
-        licgen_core::verification::VerificationEnvironment::Development,
-    );
+    let runtime = LicenseRuntime::new(binding, keyring, LicenseState::default());
     let signer: Arc<dyn LicenseSigner> =
         Arc::new(InMemorySigner::from_seed(&seed, "primary").expect("signer"));
     let metadata = KeyMetadataSnapshot::new(
@@ -148,9 +141,6 @@ fn issue_modern_license(
         environment: licgen_core::verification::VerificationEnvironment::Development,
         allow_unsafe_plan: false,
         key_metadata,
-        audit_output_path: None,
-        audit_source: None,
-        audit_operator: None,
     })
     .expect("issue license")
     .signed_license
@@ -173,15 +163,6 @@ fn persisted_hardware_hash(dir: &std::path::Path) -> String {
         .to_string()
 }
 
-fn assert_installation_json_without_secret(dir: &std::path::Path) {
-    let bytes = fs::read(dir.join("installation.json")).expect("read installation file");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("installation json");
-    assert!(
-        value.get("keypair_b64").is_none(),
-        "installation.json must not contain keypair_b64"
-    );
-}
-
 fn now_ts() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -191,7 +172,6 @@ fn request_uses_current_observed_binding() {
     let dir = temp_dir("req-current");
     let (runtime, _signer, _meta) =
         runtime_with_observer(&dir, observer("machine-a", "cpu-a", "host-a"));
-    assert_installation_json_without_secret(&dir);
 
     let (request, _bytes) = runtime
         .generate_request_bytes("monthly", Some("Observed Binding".into()))
@@ -276,11 +256,6 @@ fn cloned_installation_json_and_license_do_not_validate_on_other_environment() {
         dir_b.join("installation.json"),
     )
     .expect("clone installation state");
-    fs::copy(
-        dir_a.join("installation.key"),
-        dir_b.join("installation.key"),
-    )
-    .expect("clone installation key");
     let (runtime_b, _signer_b, _metadata_b) =
         runtime_with_observer(&dir_b, observer("machine-b", "cpu-a", "host-a"));
     let clone_hash = runtime_b.device_hash_hex();

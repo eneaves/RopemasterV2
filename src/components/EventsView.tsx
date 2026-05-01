@@ -387,25 +387,6 @@ export function EventsView({
             setIsNewEventOpen(false)
           }
         }}
-        onImportEvent={async (result, targetSeriesId) => {
-          if (Number(targetSeriesId) !== Number(series.id)) {
-            toast.info(`El evento se restauró en otra serie: ${result.eventName}`)
-            return
-          }
-
-          const refreshed = await getEvents(Number(series.id))
-          const sidStr = String(series.id ?? '')
-          const filteredBySeries = (refreshed as any[])
-            .map(mapEventRow)
-            .filter((ev) => String(ev.seriesId) === sidStr)
-
-          setEvents(filteredBySeries)
-
-          const imported = filteredBySeries.find((ev) => Number(ev.id) === Number(result.eventId))
-          if (imported) {
-            onEditEvent(imported)
-          }
-        }}
         seriesId={series.id}
       />
 

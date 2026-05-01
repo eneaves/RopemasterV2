@@ -14,6 +14,8 @@
 use std::fs;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use ed25519_dalek::PublicKey;
 use licgen_core::audit::issuance::{IssuanceAuditRecord, IssuanceAuditSink};
 use licgen_core::crypto::{
@@ -30,11 +32,11 @@ use uuid::Uuid;
 use super::runtime::{
     device_binding::DeviceBindingStore,
     fingerprint::{HardwareObserver, ObservedHardware},
-    key_store::InstallationKeyStore,
+    key_store::{FileBackedKeyStore, InstallationKeyStore},
     keyring::LicenseKeyring,
     LicenseRuntime,
 };
-use super::validator::{DEFAULT_APP_ID, LicenseRuntimeStatus};
+use super::validator::{self, LicenseRuntimeStatus, DEFAULT_APP_ID};
 use super::{BindingMatch, LicenseFormatKind, LicenseState};
 
 // ── Test infrastructure ─────────────────────────────────────────────────────
@@ -74,7 +76,6 @@ fn obs(machine_id: &str) -> Arc<dyn HardwareObserver + Send + Sync> {
     Arc::new(FixedObserver(ObservedHardware {
         platform: shared_core::Platform::Macos,
         machine_id: Some(machine_id.into()),
-        disk_serial: Some(format!("disk-{machine_id}")),
         cpu_model: Some("Apple M1".into()),
         hostname: Some("host".into()),
         locale: Some("en_US.UTF-8".into()),
@@ -86,7 +87,6 @@ fn obs_no_machine_id() -> Arc<dyn HardwareObserver + Send + Sync> {
     Arc::new(FixedObserver(ObservedHardware {
         platform: shared_core::Platform::Macos,
         machine_id: None,
-        disk_serial: Some("disk-a".into()),
         cpu_model: Some("Apple M1".into()),
         hostname: Some("host".into()),
         locale: Some("en_US.UTF-8".into()),
@@ -114,13 +114,7 @@ fn setup(
         key_id: "primary",
         public_key,
     });
-    let runtime = LicenseRuntime::new(
-        binding,
-        keyring,
-        LicenseState::default(),
-        dir.to_path_buf(),
-        licgen_core::verification::VerificationEnvironment::Development,
-    );
+    let runtime = LicenseRuntime::new(binding, keyring, LicenseState::default());
     let signer: Arc<dyn LicenseSigner> =
         Arc::new(InMemorySigner::from_seed(&seed, "primary").unwrap());
     let meta = KeyMetadataSnapshot::new(
@@ -168,9 +162,6 @@ fn issue_modern(
         environment: licgen_core::verification::VerificationEnvironment::Development,
         allow_unsafe_plan: false,
         key_metadata: meta,
-        audit_output_path: None,
-        audit_source: None,
-        audit_operator: None,
     })
     .expect("issue license")
     .signed_license
@@ -205,7 +196,7 @@ fn insufficient_observation_does_not_contaminate_persisted_state() {
     let original_hash = store.device_hash_hex();
 
     // Attempt refresh with insufficient observer fails
-    let store_b = store.clone();
+    let mut store_b = store.clone();
     // We can't directly call refresh with a different observer, but we ensure
     // the persisted file remains unchanged.
     let persisted: serde_json::Value =
@@ -286,11 +277,6 @@ fn hardware_change_produces_explicit_device_mismatch() {
     fs::copy(
         dir_a.join("installation.json"),
         dir_b.join("installation.json"),
-    )
-    .unwrap();
-    fs::copy(
-        dir_a.join("installation.key"),
-        dir_b.join("installation.key"),
     )
     .unwrap();
     let (runtime_b, _signer_b, _meta_b) = setup(&dir_b, obs("machine-b"));
@@ -455,11 +441,6 @@ fn device_mismatch_blocks_ensure_active() {
         dir_b.join("installation.json"),
     )
     .unwrap();
-    std::fs::copy(
-        dir_a.join("installation.key"),
-        dir_b.join("installation.key"),
-    )
-    .unwrap();
     let (runtime_b, _, _) = setup(&dir_b, obs("machine-b"));
 
     // Evaluation-level check: mismatch must be detected.
@@ -499,9 +480,6 @@ fn valid_license_passes_ensure_active() {
     let dir = temp_dir("ensure-active-valid");
     let (runtime, signer, meta) = setup(&dir, obs("machine-a"));
     let license_bytes = issue_modern(&runtime, signer, meta);
-    runtime
-        .evaluate_license_bytes(&license_bytes, now())
-        .expect("bootstrap verification should create snapshot");
 
     let record = StoredLicenseBlob {
         raw_bytes: license_bytes,
@@ -564,7 +542,6 @@ fn ensure_active_state_blocks_mismatch_binding_even_with_valid_time_window() {
         license: mismatch_license,
         installed_at: t,
         last_verified_at: t,
-        raw_bytes: Vec::new(),
     }));
 
     let result = ensure_active(&state);

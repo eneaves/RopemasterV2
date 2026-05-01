@@ -5,11 +5,6 @@ import type {
   LicenseRequestSummaryDto,
   LicenseStatusDto,
 } from '../types/license';
-import type {
-  BackupInspection,
-  ImportEventBackupPayload,
-  ImportEventBackupResult,
-} from '../types';
 
 // Series
 export const getSeries = () => invoke<any[]>('list_series');
@@ -304,7 +299,6 @@ export const getPayoutBreakdown = (eventId: number) =>
     total_pot: number;
     deductions: number;
     net_pot: number;
-    deduction_pct?: number;
     payouts: Array<{ place: number; percentage: number; amount: number }>;
   }>('get_payout_breakdown', { eventId });
 
@@ -318,70 +312,6 @@ export const exportEvent = (eventId: number, options: {
   include_blocked?: boolean;
   file_path: string;
 }) => invoke<void>('export_event_to_excel', { eventId, options });
-
-type BackupInspectionDto = {
-  format: string;
-  version: number;
-  event_name: string;
-  event_date: string;
-  rounds: number;
-  ropers_count: number;
-  teams_count: number;
-  runs_count: number;
-  warnings: string[];
-};
-
-type ImportEventBackupResultDto = {
-  event_id: number;
-  event_name: string;
-  ropers_created: number;
-  ropers_reused: number;
-  teams_created: number;
-  runs_created: number;
-  warnings: string[];
-};
-
-const mapBackupInspection = (dto: BackupInspectionDto): BackupInspection => ({
-  format: dto.format,
-  version: dto.version,
-  eventName: dto.event_name,
-  eventDate: dto.event_date,
-  rounds: dto.rounds,
-  ropersCount: dto.ropers_count,
-  teamsCount: dto.teams_count,
-  runsCount: dto.runs_count,
-  warnings: Array.isArray(dto.warnings) ? dto.warnings : [],
-});
-
-const mapImportEventBackupResult = (dto: ImportEventBackupResultDto): ImportEventBackupResult => ({
-  eventId: dto.event_id,
-  eventName: dto.event_name,
-  ropersCreated: dto.ropers_created,
-  ropersReused: dto.ropers_reused,
-  teamsCreated: dto.teams_created,
-  runsCreated: dto.runs_created,
-  warnings: Array.isArray(dto.warnings) ? dto.warnings : [],
-});
-
-export const exportEventBackup = (eventId: number, filePath: string) =>
-  invoke<void>('export_event_backup', { eventId, filePath });
-
-export const inspectEventBackup = async (filePath: string) =>
-  mapBackupInspection(
-    await invoke<BackupInspectionDto>('inspect_event_backup', { filePath })
-  );
-
-export const importEventBackup = async (payload: ImportEventBackupPayload) =>
-  mapImportEventBackupResult(
-    await invoke<ImportEventBackupResultDto>('import_event_backup', {
-      payload: {
-        file_path: payload.filePath,
-        target_series_id: payload.targetSeriesId,
-        restore_status_mode: payload.restoreStatusMode,
-        dedupe_ropers: payload.dedupeRopers,
-      },
-    })
-  );
 
 export const getRecentActivity = (limit: number, offset: number = 0) =>
   invoke<any[]>('get_recent_activity', { limit, offset });

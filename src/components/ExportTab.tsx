@@ -6,8 +6,7 @@ import { Checkbox } from './ui/checkbox'
 import { Label } from './ui/label'
 import { toast } from 'sonner'
 import { save } from '@tauri-apps/plugin-dialog'
-import { exportEvent, exportEventBackup } from '../lib/api'
-import { buildEventBackupFilename, getEventBackupErrorMessage } from '../lib/event-backup-ui'
+import { exportEvent } from '../lib/api'
 
 interface ExportTabProps {
   event: any
@@ -76,33 +75,6 @@ export function ExportTab({ event, series }: ExportTabProps) {
     }
   }
 
-  const handleExportBackup = async () => {
-    try {
-      const defaultFilename = buildEventBackupFilename(series?.name ?? 'Serie', event?.name ?? 'Evento')
-      const filePath = await save({
-        defaultPath: defaultFilename,
-        filters: [{
-          name: 'Backup de evento',
-          extensions: ['xlsx']
-        }]
-      })
-
-      if (!filePath) return
-
-      const toastId = toast.loading('Generando backup del evento...')
-      await exportEventBackup(Number(event.id), filePath)
-      toast.dismiss(toastId)
-      toast.success('Backup exportado', {
-        description: 'Este archivo sirve para restaurar el evento como respaldo.',
-      })
-    } catch (error) {
-      console.error(error)
-      toast.error('Error al exportar el backup', {
-        description: getEventBackupErrorMessage(error, 'Intenta de nuevo con otro destino.'),
-      })
-    }
-  }
-
   const handleToggleSheet = (sheet: keyof typeof selectedSheets) => {
     setSelectedSheets((prev) => ({ ...prev, [sheet]: !prev[sheet] }))
   }
@@ -160,16 +132,6 @@ export function ExportTab({ event, series }: ExportTabProps) {
         >
           <Download className="w-5 h-5 mr-2" />
           Export to Excel ({selectedCount} {selectedCount === 1 ? 'sheet' : 'sheets'})
-        </Button>
-
-        <Button
-          onClick={handleExportBackup}
-          size="lg"
-          variant="secondary"
-          className="w-full mt-3 rounded-xl h-11"
-        >
-          <HardDrive className="w-5 h-5 mr-2" />
-          Exportar Backup
         </Button>
       </div>
 

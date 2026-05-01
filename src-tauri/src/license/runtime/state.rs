@@ -1,17 +1,14 @@
 use crate::license::runtime::fingerprint::DeviceFingerprint;
+use ed25519_dalek::Keypair;
 use hex;
 use std::fmt;
-use std::sync::Arc;
-
-use super::key_store::InstallationKeyStore;
 
 /// Installation identity persisted on disk so the client can prove
 /// its binding without regenerating identifiers on each boot.
 pub struct InstallationState {
     pub installation_id: String,
     pub hardware_hash: [u8; 32],
-    pub installation_pubkey: [u8; 32],
-    pub key_store: Arc<dyn InstallationKeyStore + Send + Sync>,
+    pub keypair: Keypair,
     pub fingerprint: DeviceFingerprint,
     pub created_at: i64,
     pub migrated_from_legacy: bool,
@@ -28,7 +25,7 @@ impl InstallationState {
     }
 
     pub fn installation_pubkey(&self) -> [u8; 32] {
-        self.installation_pubkey
+        self.keypair.public.to_bytes()
     }
 
     #[allow(dead_code)]
@@ -36,15 +33,26 @@ impl InstallationState {
         &self.fingerprint
     }
 
+    pub fn refresh_observed_binding(
+        &mut self,
+        fingerprint: DeviceFingerprint,
+        hardware_hash: [u8; 32],
+    ) -> bool {
+        let changed = self.hardware_hash != hardware_hash || self.fingerprint != fingerprint;
+        self.hardware_hash = hardware_hash;
+        self.fingerprint = fingerprint;
+        changed
+    }
 }
 
 impl Clone for InstallationState {
     fn clone(&self) -> Self {
+        let keypair =
+            Keypair::from_bytes(&self.keypair.to_bytes()).expect("clone installation keypair");
         Self {
             installation_id: self.installation_id.clone(),
             hardware_hash: self.hardware_hash,
-            installation_pubkey: self.installation_pubkey,
-            key_store: Arc::clone(&self.key_store),
+            keypair,
             fingerprint: self.fingerprint.clone(),
             created_at: self.created_at,
             migrated_from_legacy: self.migrated_from_legacy,

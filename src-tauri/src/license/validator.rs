@@ -1,16 +1,12 @@
 /// The app_id this installation targets. Re-exported from shared_core — single source of truth.
 pub use shared_core::DEFAULT_APP_ID;
 
-use super::NormalizedLicense;
-
-#[cfg(test)]
+use ed25519_dalek::PublicKey;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
 use super::{
-    modern,
-    runtime::keyring::{KeyLookupError, LicenseKeyring},
-    BindingMatch, CommandError, LicenseFormatKind, NormalizedFailureReason,
+    modern, runtime::keyring::LicenseKeyring, BindingMatch, CommandError, LicenseFormatKind,
+    NormalizedFailureReason, NormalizedLicense,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +23,6 @@ pub struct LicenseEvaluation {
     pub status: LicenseRuntimeStatus,
 }
 
-#[cfg(test)]
 pub fn evaluate_license(
     keyring: &dyn LicenseKeyring,
     license_bytes: &[u8],
@@ -60,7 +55,6 @@ pub fn evaluate_license(
     )
 }
 
-#[cfg(test)]
 fn evaluate_modern_license(
     keyring: &dyn LicenseKeyring,
     license_bytes: &[u8],
@@ -90,13 +84,24 @@ fn evaluate_modern_license(
         })?;
     let key_version = parsed.payload.security_policy.key_version.as_deref();
     let public_key = keyring
-        .lookup_key(&key_id, key_version)
-        .map_err(map_key_lookup_error)?
-        .public_key;
+        .resolve_key_versioned(&key_id, key_version)
+        .ok_or_else(|| {
+            // Distinguish unknown key_id from version mismatch for clearer diagnostics.
+            if keyring.resolve_key(&key_id).is_some() {
+                CommandError::new(
+                    "KeyVersionMismatch",
+                    format!("key_version incompatible para key_id={key_id}"),
+                )
+            } else {
+                CommandError::new(
+                    "UnknownKeyId",
+                    format!("La licencia usa key_id desconocido: {key_id}"),
+                )
+            }
+        })?;
     parsed
         .verify_signature(&public_key)
         .map_err(map_modern_error)?;
-    reject_unsupported_hybrid_policies(&parsed.payload)?;
 
     let app_id = parsed
         .metadata_string("app_id")
@@ -172,74 +177,6 @@ fn evaluate_modern_license(
     Ok(LicenseEvaluation { license, status })
 }
 
-#[cfg(test)]
-fn map_key_lookup_error(err: KeyLookupError) -> CommandError {
-    match err {
-        KeyLookupError::UnknownKeyId { key_id } => CommandError::new(
-            "UnknownKeyId",
-            format!("La licencia usa key_id desconocido: {key_id}"),
-        ),
-        KeyLookupError::KeyVersionMismatch {
-            key_id,
-            key_version,
-        } => CommandError::new(
-            "KeyVersionMismatch",
-            format!(
-                "key_version incompatible para key_id={key_id}: recibido {:?}",
-                key_version
-            ),
-        ),
-        KeyLookupError::RetiredKey {
-            key_id,
-            key_version,
-        } => CommandError::new(
-            "RetiredKey",
-            format!(
-                "La licencia usa una llave retirada: key_id={key_id}, key_version={:?}",
-                key_version
-            ),
-        ),
-    }
-}
-
-#[cfg(test)]
-fn reject_unsupported_hybrid_policies(
-    payload: &modern::ModernLicensePayload,
-) -> Result<(), CommandError> {
-    if payload.offline_policy.lease_required {
-        return Err(CommandError::new(
-            "LeaseUnsupported",
-            "offline_policy.lease_required requiere lease/check-in online real y hoy no está soportado.",
-        ));
-    }
-    if payload.offline_policy.grace_days > 0 {
-        return Err(CommandError::new(
-            "HybridPolicyUnsupported",
-            "offline_policy.grace_days requiere enforcement real de lease/check-in y hoy no está soportado.",
-        ));
-    }
-    if payload.offline_policy.last_online_check_at.is_some() {
-        return Err(CommandError::new(
-            "HybridPolicyUnsupported",
-            "offline_policy.last_online_check_at requiere check-in online real y hoy no está soportado.",
-        ));
-    }
-    if payload.installation.last_online_check_at.is_some() {
-        return Err(CommandError::new(
-            "HybridPolicyUnsupported",
-            "installation.last_online_check_at requiere check-in online real y hoy no está soportado.",
-        ));
-    }
-    if payload.security_policy.revocation_epoch.is_some() {
-        return Err(CommandError::new(
-            "RevocationUnsupported",
-            "security_policy.revocation_epoch requiere revocación online real y hoy no está soportado.",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
 fn classify_modern_binding(
     parsed: &modern::ParsedModernLicense,
     current_device_hash_hex: &str,
@@ -271,7 +208,6 @@ fn classify_modern_binding(
     BindingMatch::Mismatch
 }
 
-#[cfg(test)]
 fn classify_runtime(
     not_before: i64,
     not_after: i64,
@@ -292,7 +228,6 @@ fn classify_runtime(
     LicenseRuntimeStatus::Active
 }
 
-#[cfg(test)]
 fn failure_reason_for_status(status: LicenseRuntimeStatus) -> Option<NormalizedFailureReason> {
     match status {
         LicenseRuntimeStatus::Active => None,
@@ -302,14 +237,12 @@ fn failure_reason_for_status(status: LicenseRuntimeStatus) -> Option<NormalizedF
     }
 }
 
-#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
-#[cfg(test)]
 fn map_modern_error(err: modern::ModernLicenseError) -> CommandError {
     match err {
         modern::ModernLicenseError::InvalidSignature => CommandError::new(
@@ -326,8 +259,10 @@ fn map_modern_error(err: modern::ModernLicenseError) -> CommandError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::{Duration, TimeZone, Utc};
-    use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer};
+    use ed25519_dalek::{Keypair, SecretKey, Signer};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -364,26 +299,6 @@ mod tests {
         installation_pubkey_b64: &str,
         device_hash_hex: &str,
     ) -> Vec<u8> {
-        encode_modern_license_bytes_with_key_version(
-            keypair,
-            key_id,
-            "2026.04",
-            app_id,
-            installation_id,
-            installation_pubkey_b64,
-            device_hash_hex,
-        )
-    }
-
-    fn encode_modern_license_bytes_with_key_version(
-        keypair: &Keypair,
-        key_id: &str,
-        key_version: &str,
-        app_id: &str,
-        installation_id: &str,
-        installation_pubkey_b64: &str,
-        device_hash_hex: &str,
-    ) -> Vec<u8> {
         let issued_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let payload = json!({
             "license_version": modern::LICENSE_VERSION,
@@ -410,14 +325,14 @@ mod tests {
             "offline_policy": {
                 "lease_required": false,
                 "max_offline_days": 30,
-                "grace_days": 0,
+                "grace_days": 5,
                 "last_online_check_at": null
             },
             "security_policy": {
                 "policy_version": 1,
                 "revocation_epoch": null,
                 "key_id": key_id,
-                "key_version": key_version,
+                "key_version": "2026.04",
                 "allowed_fingerprints": []
             },
             "device_fingerprint_v2": {
@@ -750,113 +665,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.status, LicenseRuntimeStatus::Active);
-    }
-
-    #[test]
-    fn accepted_key_version_passes_verification() {
-        use crate::license::runtime::keyring::{KeyStatus, MultiKeyring};
-
-        let keypair = test_keypair();
-        let device_hash = [9u8; 32];
-        let installation_id = Uuid::new_v4().to_string();
-        let installation_pubkey = "base64-pubkey";
-        let bytes = encode_modern_license_bytes_with_key_version(
-            &keypair,
-            "primary",
-            "2026.04",
-            DEFAULT_APP_ID,
-            &installation_id,
-            installation_pubkey,
-            &hex::encode(device_hash),
-        );
-        let keyring = MultiKeyring::new().with_key_status(
-            "primary",
-            keypair.public,
-            Some("2026.04".to_string()),
-            KeyStatus::Accepted,
-        );
-        let result = evaluate_license(
-            &keyring,
-            &bytes,
-            &device_hash,
-            None,
-            &installation_id,
-            installation_pubkey,
-            1_700_000_100,
-        )
-        .unwrap();
-        assert_eq!(result.status, LicenseRuntimeStatus::Active);
-    }
-
-    #[test]
-    fn deprecated_key_version_passes_verification() {
-        use crate::license::runtime::keyring::{KeyStatus, MultiKeyring};
-
-        let keypair = test_keypair();
-        let device_hash = [9u8; 32];
-        let installation_id = Uuid::new_v4().to_string();
-        let installation_pubkey = "base64-pubkey";
-        let bytes = encode_modern_license_bytes_with_key_version(
-            &keypair,
-            "primary",
-            "2026.04",
-            DEFAULT_APP_ID,
-            &installation_id,
-            installation_pubkey,
-            &hex::encode(device_hash),
-        );
-        let keyring = MultiKeyring::new().with_key_status(
-            "primary",
-            keypair.public,
-            Some("2026.04".to_string()),
-            KeyStatus::Deprecated,
-        );
-        let result = evaluate_license(
-            &keyring,
-            &bytes,
-            &device_hash,
-            None,
-            &installation_id,
-            installation_pubkey,
-            1_700_000_100,
-        )
-        .unwrap();
-        assert_eq!(result.status, LicenseRuntimeStatus::Active);
-    }
-
-    #[test]
-    fn retired_key_version_is_rejected_by_policy() {
-        use crate::license::runtime::keyring::{KeyStatus, MultiKeyring};
-
-        let keypair = test_keypair();
-        let device_hash = [9u8; 32];
-        let installation_id = Uuid::new_v4().to_string();
-        let installation_pubkey = "base64-pubkey";
-        let bytes = encode_modern_license_bytes_with_key_version(
-            &keypair,
-            "primary",
-            "2026.01",
-            DEFAULT_APP_ID,
-            &installation_id,
-            installation_pubkey,
-            &hex::encode(device_hash),
-        );
-        let keyring = MultiKeyring::new().with_key_status(
-            "primary",
-            keypair.public,
-            Some("2026.01".to_string()),
-            KeyStatus::Retired,
-        );
-        let err = evaluate_license(
-            &keyring,
-            &bytes,
-            &device_hash,
-            None,
-            &installation_id,
-            installation_pubkey,
-            1_700_000_100,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, "RetiredKey");
     }
 }

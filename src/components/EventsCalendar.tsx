@@ -461,22 +461,7 @@ export function EventsCalendar({ onViewList }: { onViewList?: (seriesId: string)
       </aside>
 
       {/* NewEventModal: controlled locally */}
-      <NewEventModal
-        isOpen={isNewEventOpen}
-        onClose={() => setIsNewEventOpen(false)}
-        seriesId={selectedSeriesId === 'ALL' ? '' : selectedSeriesId}
-        onCreateEvent={async (e) => await handleCreateEvent(e)}
-        onImportEvent={async (result, targetSeriesId) => {
-          setSelectedSeriesId(String(targetSeriesId))
-          try {
-            const data = await getEvents(Number(targetSeriesId))
-            setEvents((data as any[]).map(mapEventRow))
-            toast.info(`Evento restaurado: ${result.eventName}`)
-          } catch {
-            toast.info(`Evento restaurado en la serie ${targetSeriesId}`)
-          }
-        }}
-      />
+      <NewEventModal isOpen={isNewEventOpen} onClose={() => setIsNewEventOpen(false)} seriesId={selectedSeriesId === 'ALL' ? '' : selectedSeriesId} onCreateEvent={async (e) => await handleCreateEvent(e)} />
     </div>
   )
 }

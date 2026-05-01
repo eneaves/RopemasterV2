@@ -32,9 +32,10 @@ pub enum NormalizedFailureReason {
 
 /// Representación normalizada de una licencia evaluada.
 ///
-/// Los campos híbridos permanecen en el contrato normalizado para diagnóstico,
-/// pero una licencia que los declare debe ser rechazada por la verificación
-/// endurecida antes de llegar a estado activo.
+/// Los campos marcados **HYBRID-GROUNDWORK** están presentes y populados pero
+/// su enforcement no está activo client-side todavía. Son informativos y permiten
+/// al UI mostrar el estado correcto, y a futuro activar enforcement sin cambiar
+/// el contrato del struct.
 #[derive(Debug, Clone, Serialize)]
 pub struct NormalizedLicense {
     // --- Campos de identidad ---
@@ -62,13 +63,15 @@ pub struct NormalizedLicense {
     /// es el límite real; `max_offline_days` cobra relevancia solo en modo híbrido.
     pub max_offline_days: u16,
 
-    // --- Política híbrida no soportada ---
-    /// `true` si la licencia declaraba check-in periódico. El runtime endurecido
-    /// rechaza estas licencias como no soportadas.
+    // --- Política híbrida groundwork (parseados, NO enforced client-side hoy) ---
+    /// HYBRID-GROUNDWORK: `true` si el operador requiere check-in periódico.
+    /// Hoy la licencia se acepta sin check-in. Cuando exista servidor de lease,
+    /// una licencia con `lease_required=true` y `max_offline_days` excedido
+    /// debe ser bloqueada.
     pub lease_required: bool,
 
-    /// Epoch de revocación declarada por el operador. El runtime endurecido
-    /// rechaza estas licencias como no soportadas.
+    /// HYBRID-GROUNDWORK: epoch de revocación declarada por el operador.
+    /// `None` = sin revocación declarada. Enforcement pendiente de CRL/endpoint.
     pub revocation_epoch: Option<u64>,
 
     /// Número de fingerprints en la lista `allowed_fingerprints`.
