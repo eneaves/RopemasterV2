@@ -1527,8 +1527,9 @@ async fn create_team_internal(db: &Db, t: NewTeam) -> Result<i64, String> {
         );
     }
 
-    let rows =
-        sqlx::query_as::<_, (i64, i64)>("SELECT id, is_active FROM roper WHERE id = ?1 OR id = ?2")
+    let rows = sqlx::query_as::<_, (i64, i64, String)>(
+        "SELECT id, is_active, specialty FROM roper WHERE id = ?1 OR id = ?2",
+    )
             .bind(t.header_id)
             .bind(t.heeler_id)
             .fetch_all(&db.0)
@@ -1540,14 +1541,22 @@ async fn create_team_internal(db: &Db, t: NewTeam) -> Result<i64, String> {
 
     let mut header_active: Option<bool> = None;
     let mut heeler_active: Option<bool> = None;
-    for (id, is_active) in rows {
+    let mut header_specialty: Option<String> = None;
+    let mut heeler_specialty: Option<String> = None;
+    for (id, is_active, specialty) in rows {
         if id == t.header_id {
             header_active = Some(is_active == 1);
+            header_specialty = Some(specialty);
         } else if id == t.heeler_id {
             heeler_active = Some(is_active == 1);
+            heeler_specialty = Some(specialty);
         }
     }
-    if header_active.is_none() || heeler_active.is_none() {
+    if header_active.is_none()
+        || heeler_active.is_none()
+        || header_specialty.is_none()
+        || heeler_specialty.is_none()
+    {
         tracing::error!("create_team failed: missing roper record");
         return Err("Header o Heeler no existen en la tabla roper.".into());
     }
@@ -1555,6 +1564,12 @@ async fn create_team_internal(db: &Db, t: NewTeam) -> Result<i64, String> {
         return Err(
             "Al menos uno de los ropers está inactivo. Rehabilítalo desde el directorio.".into(),
         );
+    }
+    if !matches!(header_specialty.as_deref(), Some("header" | "both")) {
+        return Err("El roper asignado como Header no tiene especialidad de header.".into());
+    }
+    if !matches!(heeler_specialty.as_deref(), Some("heeler" | "both")) {
+        return Err("El roper asignado como Heeler no tiene especialidad de heeler.".into());
     }
 
     // Verifica que ambos estén inscritos en el roster del evento
@@ -4216,5 +4231,73 @@ mod tests {
         )
         .await
         .expect("team should succeed once roster is active");
+    }
+
+    #[tokio::test]
+    async fn create_team_requires_matching_specialties() {
+        let db = setup_test_db().await;
+        let event_id = seed_event(&db).await;
+
+        sync_event_roster_internal(
+            &db,
+            SyncEventRosterPayload {
+                event_id,
+                entries: vec![
+                    roster_entry(
+                        "Harry",
+                        "Header",
+                        "harry.header@example.com",
+                        "header",
+                        "confirmed",
+                    ),
+                    roster_entry(
+                        "Helen",
+                        "Header",
+                        "helen.header@example.com",
+                        "header",
+                        "confirmed",
+                    ),
+                    roster_entry(
+                        "Ian",
+                        "Heeler",
+                        "ian.heeler@example.com",
+                        "heeler",
+                        "confirmed",
+                    ),
+                ],
+                withdraw_absent: Some(true),
+            },
+        )
+        .await
+        .expect("sync roster");
+
+        let header_id = roper_id_by_email(&db, "harry.header@example.com").await;
+        let invalid_heeler_id = roper_id_by_email(&db, "helen.header@example.com").await;
+        let valid_heeler_id = roper_id_by_email(&db, "ian.heeler@example.com").await;
+
+        let err = create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id: invalid_heeler_id,
+                rating: 8.0,
+            },
+        )
+        .await
+        .expect_err("should fail because heeler specialty is header");
+        assert!(err.contains("especialidad de heeler"), "unexpected error message: {}", err);
+
+        create_team_internal(
+            &db,
+            NewTeam {
+                event_id,
+                header_id,
+                heeler_id: valid_heeler_id,
+                rating: 8.0,
+            },
+        )
+        .await
+        .expect("team should succeed with a matching heeler specialty");
     }
 }

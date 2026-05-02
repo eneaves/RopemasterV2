@@ -151,12 +151,14 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
         id: Number(r.roperId),
         label: `${r.firstName} ${r.lastName} — ${r.level} (Confirmado)`,
         rating: Number(r.ratingOverride ?? r.rating ?? 0),
+        specialty: r.specialty,
       }))
     }
     return globalRopers.map((r) => ({
       id: r.id,
       label: `${r.firstName} ${r.lastName} — ${r.level ?? 'amateur'}`,
       rating: r.rating,
+      specialty: r.specialty,
     }))
   }, [confirmedRoster, eventRoster.length, globalRopers])
 
@@ -374,6 +376,14 @@ export function TeamsTab({ event, isLocked, onTeamsUpdated }: TeamsTabProps) {
     }
     if (!heelerMeta || heelerMeta.rosterStatus === 'withdrawn') {
       toast.error('El heeler seleccionado no forma parte del roster activo.')
+      return
+    }
+    if (headerMeta.specialty !== 'header' && headerMeta.specialty !== 'both') {
+      toast.error('El roper seleccionado como header no tiene especialidad de header.')
+      return
+    }
+    if (heelerMeta.specialty !== 'heeler' && heelerMeta.specialty !== 'both') {
+      toast.error('El roper seleccionado como heeler no tiene especialidad de heeler.')
       return
     }
 

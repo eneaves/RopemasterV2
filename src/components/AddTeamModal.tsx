@@ -11,7 +11,7 @@ interface AddTeamModalProps {
   onAddTeam: (team: { header_id: number; heeler_id: number; headerRating: number; heelerRating: number }) => void
   initialValue?: { header_id: number; heeler_id: number; headerRating: number; heelerRating: number }
   // options for selects
-  roperOptions?: Array<{ id: number; label: string; rating?: number }>
+  roperOptions?: Array<{ id: number; label: string; rating?: number; specialty?: 'header' | 'heeler' | 'both' }>
   maxRating?: number
 }
 
@@ -38,6 +38,12 @@ export function AddTeamModal({ isOpen, onClose, onAddTeam, initialValue, roperOp
   }, [initialValue, isOpen])
 
   const total = (parseFloat(form.headerRating) || 0) + (parseFloat(form.heelerRating) || 0)
+  const headerOptions = (roperOptions ?? []).filter(
+    (opt) => opt.specialty === 'header' || opt.specialty === 'both',
+  )
+  const heelerOptions = (roperOptions ?? []).filter(
+    (opt) => opt.specialty === 'heeler' || opt.specialty === 'both',
+  )
 
   // when user selects header or heeler, auto-fill rating from roperOptions if present
   useEffect(() => {
@@ -97,7 +103,7 @@ export function AddTeamModal({ isOpen, onClose, onAddTeam, initialValue, roperOp
                 className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm"
               >
                 <option value="">Selecciona Header</option>
-                {roperOptions?.map((opt: { id: number; label: string }) => (
+                {headerOptions.map((opt) => (
                   <option key={opt.id} value={String(opt.id)}>{opt.label}</option>
                 ))}
               </select>
@@ -131,7 +137,7 @@ export function AddTeamModal({ isOpen, onClose, onAddTeam, initialValue, roperOp
                 className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm"
               >
                 <option value="">Selecciona Heeler</option>
-                {roperOptions?.map((opt: { id: number; label: string }) => (
+                {heelerOptions.map((opt) => (
                   <option key={opt.id} value={String(opt.id)}>{opt.label}</option>
                 ))}
               </select>

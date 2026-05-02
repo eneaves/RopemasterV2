@@ -1018,10 +1018,10 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
               </div>
 
               {/* Timer + Buttons side by side */}
-              <div className="flex gap-3 p-3 border-b border-border">
+              <div className="flex gap-3 p-3 border-b border-border items-stretch">
                 {/* Timer display */}
                 {captureMode === 'manual' && !isManualMode ? (
-                  <div className="flex-1 bg-foreground rounded-xl flex flex-col items-center justify-center py-4 shadow-inner relative overflow-hidden">
+                  <div className="flex-1 h-[120px] bg-foreground rounded-xl flex flex-col items-center justify-center px-4 shadow-inner relative overflow-hidden">
                     <div className="absolute top-2 left-0 right-0 flex justify-center opacity-40">
                       <span className="flex items-center gap-1.5 text-background/60 text-[10px] font-mono uppercase tracking-widest">
                         <Clock className="w-2.5 h-2.5" /> Cronómetro
@@ -1032,7 +1032,7 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                     </div>
                   </div>
                 ) : (
-                  <div className="flex-1 bg-foreground rounded-xl flex flex-col items-center justify-center py-4 shadow-inner relative overflow-hidden">
+                  <div className="flex-1 h-[120px] bg-foreground rounded-xl flex flex-col items-center justify-center px-4 shadow-inner relative overflow-hidden">
                     <div className="absolute top-2 left-0 right-0 flex justify-center opacity-40">
                       <span className="flex items-center gap-1.5 text-background/60 text-[10px] font-mono uppercase tracking-widest">
                         <Clock className="w-2.5 h-2.5" /> {captureMode === 'external' ? 'Timer Externo' : 'Entrada Manual'}
@@ -1058,14 +1058,11 @@ export function CaptureRunsTab({ event, isLocked, onLock }: CaptureRunsTabProps)
                       readOnly={captureMode === 'external'}
                       className="text-[38px] font-mono font-bold text-center border-none bg-transparent text-primary tracking-tighter tabular-nums outline-none w-full [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
-                    <p className="text-background/50 text-[10px] font-mono uppercase tracking-widest mt-1">
-                      {captureMode === 'external' ? 'Capturado desde Polaris' : 'segundos'}
-                    </p>
                   </div>
                 )}
 
                 {/* Action buttons column */}
-                <div className="flex flex-col gap-2 w-44">
+                <div className="flex flex-col gap-2 w-44 h-[120px]">
                   {captureMode === 'manual' && !isManualMode ? (
                     <>
                       <Button
