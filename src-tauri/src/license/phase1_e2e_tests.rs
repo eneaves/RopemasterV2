@@ -115,6 +115,9 @@ fn phase1_req_issue_install_verify_active() {
         environment: licgen_core::verification::VerificationEnvironment::Development,
         allow_unsafe_plan: false,
         key_metadata,
+        audit_output_path: None,
+        audit_source: None,
+        audit_operator: None,
     })
     .expect("issue modern license");
 

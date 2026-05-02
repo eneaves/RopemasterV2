@@ -290,6 +290,7 @@ export const getPayoutBreakdown = (eventId: number) =>
     total_pot: number;
     deductions: number;
     net_pot: number;
+    deduction_pct: number;
     payouts: Array<{ place: number; percentage: number; amount: number }>;
   }>('get_payout_breakdown', { eventId });
 

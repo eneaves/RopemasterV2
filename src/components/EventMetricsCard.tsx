@@ -12,9 +12,9 @@ interface EventMetricsCardProps {
 }
 
 export function EventMetricsCard({ event }: EventMetricsCardProps) {
-  const totalTeams = Number(event.teamsCount ?? event.teams_count ?? 0)
-  const entryFeePerRoper = Number(event.entryFee ?? event.entry_fee ?? 0) || null
-  const potValue = Number(event.pot ?? event.total_pot ?? 0)
+  const totalTeams = Number(event.teamsCount ?? 0)
+  const entryFeePerRoper = Number(event.entryFee ?? 0) || null
+  const potValue = Number(event.pot ?? 0)
 
   const projectedPot =
     potValue === 0 && entryFeePerRoper && totalTeams > 0

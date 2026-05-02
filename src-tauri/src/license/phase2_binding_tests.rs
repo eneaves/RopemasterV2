@@ -141,6 +141,9 @@ fn issue_modern_license(
         environment: licgen_core::verification::VerificationEnvironment::Development,
         allow_unsafe_plan: false,
         key_metadata,
+        audit_output_path: None,
+        audit_source: None,
+        audit_operator: None,
     })
     .expect("issue license")
     .signed_license
